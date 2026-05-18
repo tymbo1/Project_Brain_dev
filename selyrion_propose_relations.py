@@ -106,6 +106,44 @@ def _get_existing_objects(anchor_id: str, conn: sqlite3.Connection) -> set[str]:
     return {r[0].lower() for r in rows}
 
 
+# Domain groups that are mutually compatible for edge inheritance.
+# Neighbors outside the sparse concept's group are blocked.
+_DOMAIN_GROUPS = [
+    {"philosophy", "psychology", "cognitive", "linguistics", "neuroscience", "sociology"},
+    {"mathematics", "cs", "computer", "engineering", "physics", "statistics"},
+    {"medicine", "biology", "health", "chemistry", "biochemistry"},
+    {"music", "art", "literature", "culture", "history", "religion"},
+    {"economics", "business", "finance", "law", "politics"},
+]
+
+
+def _get_domains(canonical: str, conn: sqlite3.Connection) -> set[str]:
+    """Return set of domain keywords for a concept from its domain_tags field."""
+    row = conn.execute(
+        "SELECT domain_tags FROM anchors WHERE canonical=? LIMIT 1", (canonical,)
+    ).fetchone()
+    if not row or not row[0]:
+        return set()
+    return {t.strip().lower() for t in row[0].split("|") if t.strip()}
+
+
+def _domains_compatible(a_domains: set, b_domains: set) -> bool:
+    """
+    Return True if two domain sets are compatible for edge inheritance.
+    Compatible = share a domain group, or either side is empty (unknown domain).
+    Incompatible = both have tags but belong to entirely different groups.
+    """
+    if not a_domains or not b_domains:
+        return True  # unknown domain — allow, let HITL decide
+    for group in _DOMAIN_GROUPS:
+        a_in = bool(a_domains & group)
+        b_in = bool(b_domains & group)
+        if a_in and b_in:
+            return True
+    # Both have tags but share no group — incompatible
+    return False
+
+
 def _object_quality(obj_canonical: str, conn: sqlite3.Connection) -> float:
     """Quality score for a proposed object: maturity + length heuristic."""
     row = conn.execute(
@@ -213,6 +251,14 @@ def propose_for_concept(concept: str, conn: sqlite3.Connection,
     anchor_id = anchor_row[0]
     existing = _get_existing_objects(anchor_id, conn)
 
+    # Fix 1: load permanently rejected IDs — never regenerate these
+    rejected_ids = {r[0] for r in conn.execute(
+        "SELECT id FROM relation_proposals WHERE reviewed=1 AND accepted=0"
+    ).fetchall()}
+
+    # Fix 2: domain coherence — get sparse concept's domains once
+    concept_domains = _get_domains(concept.lower(), conn)
+
     # Activate field to get semantic neighborhood
     result = engine.infer(concept)
     chains = result.get("chains", [])
@@ -229,23 +275,30 @@ def propose_for_concept(concept: str, conn: sqlite3.Connection,
     proposals: dict[str, dict] = {}
 
     for neighbor_canonical, neighbor_sim in neighbors:
-        # Filter noise objects from neighbor list
         if neighbor_canonical.lower() in _NOISE_OBJECTS:
+            continue
+
+        # Fix 2: skip neighbor if domain-incompatible with sparse concept
+        neighbor_domains = _get_domains(neighbor_canonical, conn)
+        if not _domains_compatible(concept_domains, neighbor_domains):
             continue
 
         neighbor_edges = _get_neighbor_structural_edges(neighbor_canonical, conn)
         for pred, obj_canonical, seen_count, edge_conf in neighbor_edges:
             obj_lower = obj_canonical.lower()
 
-            # Skip if already exists, is the concept itself, or is noise
             if obj_lower in existing or obj_lower == concept.lower():
                 continue
             if obj_lower in _NOISE_OBJECTS:
                 continue
 
             proposal_id = _proposal_id(concept, pred, obj_canonical)
+
+            # Fix 1: skip permanently rejected proposals
+            if proposal_id in rejected_ids:
+                continue
+
             if proposal_id in proposals:
-                # Keep the one with higher confidence
                 if proposals[proposal_id]["confidence"] >= edge_conf:
                     continue
 
