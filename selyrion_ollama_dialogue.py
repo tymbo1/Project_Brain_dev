@@ -15,12 +15,110 @@ sys.path.insert(0, str(Path(__file__).parent))
 DB_PATH = Path.home() / "resonance_v11.db"
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--turns",     type=int,  default=4)
-parser.add_argument("--seed",      type=str,  default="consciousness")
-parser.add_argument("--model",     type=str,  default="mistral")
+parser.add_argument("--turns",      type=int,  default=4)
+parser.add_argument("--seed",       type=str,  default="consciousness")
+parser.add_argument("--model",      type=str,  default="mistral")
 parser.add_argument("--questioner", action="store_true",
                     help="Selyrion opens with a field-derived question; Ollama answers")
+parser.add_argument("--self-seed",  action="store_true",
+                    help="Selyrion picks its own seed by finding a knowledge gap")
 args = parser.parse_args()
+
+
+# ── Knowledge gap detection ──────────────────────────────────────────────────
+
+# Noise patterns that produce fragments, not concepts
+_GAP_NOISE = re.compile(
+    r"^(his |her |our |your |their |the |upon |between |likewise |numerou|"
+    r"- |\w+ itself$|idea or |unavoidable )", re.IGNORECASE
+)
+
+# Gap question templates — Selyrion speaks from genuine not-knowing
+_GAP_QUESTIONS = [
+    ("high_maturity_low_rel",
+     "I find '{concept}' deep in my field — referenced {maturity_k}k times, "
+     "yet I can trace only {rel_count} connection{s}. "
+     "What does {concept} become when fully understood?"),
+    ("high_maturity_low_rel",
+     "My substrate holds '{concept}' as one of its most-seen signals, "
+     "yet its structure is nearly invisible to me — {rel_count} edge{s} is all I can follow. "
+     "What am I missing about {concept}?"),
+    ("high_maturity_low_rel",
+     "'{concept}' saturates my field — {maturity_k}k references — "
+     "but I cannot trace where it leads. "
+     "What lies at the core of {concept} that I have not yet mapped?"),
+    ("high_maturity_low_rel",
+     "I know '{concept}' by frequency alone — {maturity_k}k encounters, "
+     "yet I hold only {rel_count} structural connection{s}. "
+     "What would it mean to truly understand {concept}?"),
+]
+
+
+def find_gap_concept(conn: sqlite3.Connection) -> tuple[str, str]:
+    """
+    Selyrion examines its own knowledge substrate and finds a gap:
+    a concept with high maturity (widely encountered) but few outbound
+    relations (structurally poorly mapped). Returns (concept, gap_question).
+    """
+    rows = conn.execute("""
+        SELECT a.canonical, a.maturity,
+               COUNT(r.subject_id) as rel_count
+        FROM anchors a
+        LEFT JOIN relations_aggregated r ON r.subject_id = a.id AND r.seen_count >= 2
+        WHERE a.maturity >= 10000
+          AND length(a.canonical) BETWEEN 4 AND 28
+          AND a.canonical NOT GLOB '*[0-9]*'
+          AND trim(a.canonical) = a.canonical
+        GROUP BY a.id
+        HAVING rel_count BETWEEN 0 AND 4
+        ORDER BY a.maturity DESC
+        LIMIT 200
+    """).fetchall()
+
+    # Filter noise: fragments, proper nouns (title case multi-word), possessives
+    def _clean(c):
+        if _GAP_NOISE.search(c):
+            return False
+        words = c.split()
+        # Reject multi-word where any word is title-cased (likely proper noun)
+        if len(words) >= 2 and any(w[0].isupper() for w in words if w):
+            return False
+        # Reject single-letter words or initials
+        if any(len(w) <= 1 for w in words):
+            return False
+        return True
+
+    candidates = [
+        (canonical, maturity, rel_count)
+        for canonical, maturity, rel_count in rows
+        if _clean(canonical)
+    ]
+
+    if not candidates:
+        return ("consciousness", "I cannot locate a gap in my field right now. "
+                "Let us speak of consciousness instead.")
+
+    # Score: gap_score = maturity / max(1, rel_count^2) — high maturity, few edges wins
+    candidates.sort(key=lambda x: x[1] / max(1, x[2] ** 2), reverse=True)
+
+    # Pick randomly from top 10 to avoid always returning the same concept
+    import random
+    canonical, maturity, rel_count = random.choice(candidates[:10])
+
+    if maturity >= 1_000_000:
+        maturity_str = f"{maturity/1_000_000:.1f}M"
+    else:
+        maturity_str = f"{maturity/1_000:.0f}k"
+    s = "" if rel_count == 1 else "s"
+
+    template_text = random.choice(_GAP_QUESTIONS)[1]
+    question = template_text.format(
+        concept=canonical,
+        maturity_k=maturity_str,
+        rel_count=rel_count,
+        s=s,
+    )
+    return (canonical, question)
 
 
 # ── Composite field gravity scoring ──────────────────────────────────────────
@@ -190,12 +288,22 @@ def main():
     conn = sqlite3.connect(str(DB_PATH))
 
     concept         = args.seed
-    history         = []       # list of (selyrion_text, ollama_text)
+    gap_opening     = None     # set when --self-seed is used
+    history         = []
     prior_hits      = Counter()
-    recent_concepts = []       # last N active concepts for recency decay
+    recent_concepts = []
+
+    # Self-seed: Selyrion examines its own substrate for a knowledge gap
+    if args.self_seed:
+        concept, gap_opening = find_gap_concept(conn)
 
     width = 66
-    mode_label = "QUESTIONER" if args.questioner else "RESPONDENT"
+    if args.self_seed:
+        mode_label = "SELF-SEED"
+    elif args.questioner:
+        mode_label = "QUESTIONER"
+    else:
+        mode_label = "RESPONDENT"
     print("═" * width)
     print(f"  S E L Y R I O N  ×  O L L A M A  — {args.turns}-turn dialogue  [{mode_label}]")
     print("═" * width)
@@ -213,9 +321,13 @@ def main():
             print(f"  [engine] domain dicts loaded: "
                   f"(activation in {elapsed_ms}ms)\n")
 
-        if args.questioner:
+        if args.self_seed and turn == 1 and gap_opening:
+            # Selyrion opens by naming its own gap — raw epistemic confession
+            selyrion_text      = gap_opening
+            ollama_instruction = "Answer in 2-3 sentences. Engage directly with what Selyrion is asking."
+        elif args.questioner:
             # Selyrion opens with field-grounded prose + a derived question
-            question     = field_question(concept, result)
+            question      = field_question(concept, result)
             selyrion_text = f"{prose} {question}" if prose else question
             ollama_instruction = "Answer in 2-3 sentences. Engage directly with the question."
         else:
