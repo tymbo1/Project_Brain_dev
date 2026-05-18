@@ -228,6 +228,21 @@ def chains_to_prose(query: str, chains: list, intent: str = None) -> str:
     query_norm = query.lower().strip().replace(" ", "_")
     query_plain = query.lower().strip()
 
+    # Language names and pure grammar terms — noise in ANY predicate context.
+    # Wiktionary-origin ingestion leaks these as relation objects on any concept.
+    _LEXICAL_ANY_PRED = {
+        "german", "french", "latin", "english", "spanish", "dutch", "greek",
+        "portuguese", "italian", "arabic", "hebrew", "japanese", "chinese",
+        "noun", "verb", "adjective", "adverb", "preposition", "article",
+        "morpheme", "syllable", "phoneme", "plural", "singular", "etymology",
+    }
+    # These only pollute when used as taxonomy targets (is_a, subtype_of)
+    _CHAIN_TAX_NOISE = {
+        "word", "words", "phrase", "term", "expression", "letter",
+        "science", "linguistics", "grammar",
+    }
+    _TAX_PREDS = {"is_a", "subtype_of", "instance_of"}
+
     rels = {}
     refs = []
 
@@ -239,6 +254,14 @@ def chains_to_prose(query: str, chains: list, intent: str = None) -> str:
         subj = parts[0].strip()
         pred = parts[1].strip()
         obj  = parts[2].split(" | strength:")[0].strip()
+        obj_lower = obj.lower()
+
+        # Filter language/grammar noise: never valid as relation objects
+        if obj_lower in _LEXICAL_ANY_PRED:
+            continue
+        # Filter taxonomy-specific noise
+        if pred in _TAX_PREDS and obj_lower in _CHAIN_TAX_NOISE:
+            continue
 
         # Outbound: subject matches query
         if subj in (query_norm, query_plain):
