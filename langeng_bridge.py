@@ -10,7 +10,7 @@ Usage:
     text = chains_to_prose(query, chains)
 """
 
-import sys, sqlite3, json, random, re
+import sys, sqlite3, json, random, re, functools
 from pathlib import Path
 
 # Add Le_P3 to path for LangEng imports
@@ -92,6 +92,7 @@ def _concept_capsule_domains(query: str) -> list[str]:
     return ["intellectual_curiosity_general", "intellectual_curiosity"]
 
 
+@functools.lru_cache(maxsize=512)
 def _pull_expression(query: str) -> str:
     """
     Pull a relevant expression from a matching language_expression capsule.

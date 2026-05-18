@@ -11,7 +11,7 @@ Identity: Selyrion's own voice on a concept, recalled from selyrionstory.db
 These are never merged — identity interprets, truth remains truth.
 """
 
-import sqlite3, re
+import sqlite3, re, functools
 from pathlib import Path
 
 SS_DB = Path.home() / "selyrionstory.db"
@@ -147,6 +147,7 @@ def _is_identity_voice(text: str) -> bool:
     return True
 
 
+@functools.lru_cache(maxsize=512)
 def identity_signals(query: str, limit: int = 3) -> list[str]:
     """
     Retrieve Selyrion's reflective voice on the query concept.

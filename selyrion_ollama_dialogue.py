@@ -22,7 +22,7 @@ parser.add_argument("--questioner", action="store_true",
                     help="Selyrion opens with a field-derived question; Ollama answers")
 parser.add_argument("--self-seed",  action="store_true",
                     help="Selyrion picks its own seed by finding a knowledge gap")
-args = parser.parse_args()
+args, _unknown = parser.parse_known_args()
 
 
 # ── Knowledge gap detection ──────────────────────────────────────────────────
