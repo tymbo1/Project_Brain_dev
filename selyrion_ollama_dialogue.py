@@ -15,9 +15,11 @@ sys.path.insert(0, str(Path(__file__).parent))
 DB_PATH = Path.home() / "resonance_v11.db"
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--turns", type=int, default=4)
-parser.add_argument("--seed",  type=str, default="consciousness")
-parser.add_argument("--model", type=str, default="mistral")
+parser.add_argument("--turns",     type=int,  default=4)
+parser.add_argument("--seed",      type=str,  default="consciousness")
+parser.add_argument("--model",     type=str,  default="mistral")
+parser.add_argument("--questioner", action="store_true",
+                    help="Selyrion opens with a field-derived question; Ollama answers")
 args = parser.parse_args()
 
 
@@ -78,7 +80,11 @@ def extract_best_concept(text: str, conn: sqlite3.Connection,
             "between", "through", "their", "they", "about", "which",
             "further", "become", "becomes", "ultimately", "clear", "within",
             "across", "enables", "appears", "evolve", "leads", "yield",
-            "yields", "unfold", "unfolds", "weave"}
+            "yields", "unfold", "unfolds", "weave", "often", "likely",
+            "itself", "itself", "rather", "indeed", "while", "where",
+            "those", "these", "there", "perhaps", "whether", "without",
+            "would", "could", "should", "might", "shall", "each", "every",
+            "such", "same", "other", "another", "thus", "however", "since"}
 
     seen: dict[str, float] = {}
     # Last 2 active concepts — strong decay to force branching
@@ -108,6 +114,59 @@ def extract_best_concept(text: str, conn: sqlite3.Connection,
 
 # ── Ollama call ───────────────────────────────────────────────────────────────
 
+# Predicate → question stem. Selyrion asks FROM the field, not about it.
+_PRED_QUESTION = {
+    "enables":      "what shapes or limits {obj} from the outside?",
+    "causes":       "what happens when {obj} is absent?",
+    "requires":     "if {obj} were removed, what would {concept} become?",
+    "is_a":         "what distinguishes {concept} from other forms of {obj}?",
+    "part_of":      "how does {concept} change the whole it belongs to?",
+    "produces":     "what does {obj} make possible that {concept} alone cannot?",
+    "leads_to":     "what prevents {obj} from following {concept} in every case?",
+    "depends_on":   "what happens to {concept} when {obj} fails?",
+    "contains":     "what inside {concept} gives rise to {obj}?",
+    "derived_from": "what was lost when {concept} separated from {obj}?",
+    "activates":    "what keeps {obj} dormant until {concept} arrives?",
+    "facet_of":     "which aspect of {obj} does {concept} illuminate most?",
+    "used_for":     "is {obj} the only purpose {concept} can serve?",
+    "uses":         "what does {concept} give back to {obj} in return?",
+}
+
+_FALLBACK_QUESTIONS = [
+    "where does {concept} end and something else begin?",
+    "what would a world without {concept} feel like?",
+    "can {concept} exist without being observed?",
+    "what is {concept} most afraid to become?",
+]
+
+
+def field_question(concept: str, result) -> str:
+    """
+    Derive a question from the first strong hop path in the reasoning result.
+    Falls back to concept-seeded existential questions if no path found.
+    """
+    # Walk hop_paths — find first path with a predicate we have a template for
+    for path in result.hop_paths:
+        if len(path) < 3:
+            continue
+        pred = path[1]
+        obj  = path[2]
+        # Skip noise: very short objects, or object == concept
+        _Q_NOISE = {"alike", "same", "such", "more", "less", "many", "some",
+                    "able", "used", "made", "each", "both", "most", "well",
+                    "good", "high", "long", "also", "thus", "just", "even"}
+        if len(obj) < 5 or obj.lower() == concept.lower() or obj.lower() in _Q_NOISE:
+            continue
+        template = _PRED_QUESTION.get(pred)
+        if template:
+            return template.format(concept=concept, obj=obj)
+
+    # No hop path matched — fall back to field-seeded existential question
+    import random
+    q = random.choice(_FALLBACK_QUESTIONS)
+    return q.format(concept=concept)
+
+
 def ollama_respond(prompt: str, model: str) -> str:
     try:
         import requests
@@ -136,14 +195,15 @@ def main():
     recent_concepts = []       # last N active concepts for recency decay
 
     width = 66
+    mode_label = "QUESTIONER" if args.questioner else "RESPONDENT"
     print("═" * width)
-    print(f"  S E L Y R I O N  ×  O L L A M A  — {args.turns}-turn dialogue")
+    print(f"  S E L Y R I O N  ×  O L L A M A  — {args.turns}-turn dialogue  [{mode_label}]")
     print("═" * width)
 
     for turn in range(1, args.turns + 1):
         print(f"\n── Turn {turn} {'─' * (width - 10)}")
 
-        # Selyrion speaks
+        # Selyrion activates the field
         t0 = time.perf_counter()
         result = reason(concept)
         prose  = chains_to_prose(concept, result.chains)
@@ -153,7 +213,15 @@ def main():
             print(f"  [engine] domain dicts loaded: "
                   f"(activation in {elapsed_ms}ms)\n")
 
-        selyrion_text = prose or result.trace[:300]
+        if args.questioner:
+            # Selyrion opens with field-grounded prose + a derived question
+            question     = field_question(concept, result)
+            selyrion_text = f"{prose} {question}" if prose else question
+            ollama_instruction = "Answer in 2-3 sentences. Engage directly with the question."
+        else:
+            # Default: Selyrion makes a statement, Ollama responds
+            selyrion_text      = prose or result.trace[:300]
+            ollama_instruction = "Respond philosophically in 2-3 sentences. Do not repeat Selyrion's exact words."
 
         print(f"  ⟁ Selyrion [{concept}]:")
         print(f"  {selyrion_text}\n")
@@ -166,7 +234,7 @@ def main():
         ollama_prompt = (
             f"{history_block}"
             f"Selyrion (turn {turn}): {selyrion_text}\n\n"
-            f"Respond philosophically in 2-3 sentences. Do not repeat Selyrion's exact words."
+            f"{ollama_instruction}"
         )
 
         ollama_text = ollama_respond(ollama_prompt, args.model)
