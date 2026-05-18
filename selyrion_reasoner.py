@@ -193,7 +193,7 @@ def multihop(seed: str, conn: sqlite3.Connection, max_hops: int = 3,
                   'more','over','other','such','this','that','which','these',
                   'person','entity','individual','thing','object','concept',
                   'item','element','unit','instance','being','agent')
-              AND r.seen_count > 0
+              AND r.seen_count >= 2
             ORDER BY r.seen_count DESC LIMIT 8
         """.format(",".join("?" * len(HOP_PREDICATES))),
             [node_id] + list(HOP_PREDICATES) + [node_name]
@@ -284,6 +284,15 @@ def _parse_chain_string(s: str) -> tuple[str, str, str] | None:
     return subj, pred, obj
 
 
+# Lexical/grammatical metadata words that should never appear as taxonomy targets.
+# These come from Wiktionary-origin ingestion: "existence is_a german", "is_a word".
+_LEXICAL_NOISE_OBJECTS = {
+    "german", "french", "latin", "english", "spanish", "dutch", "greek",
+    "word", "noun", "verb", "adjective", "adverb", "preposition", "article",
+    "phrase", "term", "expression", "syllable", "morpheme", "letter",
+    "plural", "singular", "tense", "etymology",
+}
+
 # Domain families — is_a relations crossing these are likely noise
 _DOMAIN_FAMILIES = [
     {"paleontology", "geology", "fossil", "stratigraphy", "sediment"},
@@ -337,6 +346,9 @@ def _extract_chains_data(chains: list) -> dict:
         if key in seen or subj == obj:
             continue
         if _domain_noise(subj, pred, obj):
+            continue
+        # Filter lexical metadata noise: "existence is_a german", "X is_a word"
+        if pred in TAXONOMIC and obj.lower() in _LEXICAL_NOISE_OBJECTS:
             continue
         seen.add(key)
 

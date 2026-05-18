@@ -125,13 +125,28 @@ def ensure_ocr_table(conn):
             reviewed INTEGER DEFAULT 0
         )
     """)
+    # Tracks every image processed (matched or not) — enables full resume on crash
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS ocr_scanned (
+            id TEXT PRIMARY KEY,
+            filepath TEXT,
+            scanned_at REAL
+        )
+    """)
     conn.commit()
 
 
 def already_processed(conn, file_hash: str) -> bool:
     return conn.execute(
-        "SELECT 1 FROM ocr_capsules WHERE id=? LIMIT 1", (file_hash,)
+        "SELECT 1 FROM ocr_scanned WHERE id=? LIMIT 1", (file_hash,)
     ).fetchone() is not None
+
+
+def mark_scanned(conn, file_hash: str, path: Path):
+    conn.execute(
+        "INSERT OR IGNORE INTO ocr_scanned (id, filepath, scanned_at) VALUES (?,?,?)",
+        (file_hash, str(path), datetime.now().timestamp())
+    )
 
 
 def write_capsule(conn, path: Path, text: str, score: int, hits: list):
@@ -180,16 +195,31 @@ def run_scan(conn):
     print(f"Commit: {'YES' if args.commit else 'DRY RUN'}\n")
 
     matches = []
+    pending = 0          # images processed since last checkpoint
+    COMMIT_EVERY = 100   # checkpoint every N images (matched or not)
     for i, path in enumerate(images):
         fhash = img_hash(path)
         if args.commit and already_processed(conn, fhash):
             continue
 
         text = ocr_image(path)
+
+        if args.commit:
+            mark_scanned(conn, fhash, path)
+            pending += 1
+
         if not text.strip():
+            if args.commit and pending >= COMMIT_EVERY:
+                conn.commit()
+                pending = 0
             continue
 
         score, hits = score_text(text)
+
+        if args.commit and pending >= COMMIT_EVERY:
+            conn.commit()
+            pending = 0
+
         if score == 0:
             continue
 
@@ -197,7 +227,6 @@ def run_scan(conn):
         print(f"  [{i+1}/{len(images)}] MATCH score={score} {path.name}")
         for h in hits:
             print(f"    + {h}")
-        # Print snippet around first hit
         lower = text.lower()
         for h in hits:
             idx = lower.find(h)
