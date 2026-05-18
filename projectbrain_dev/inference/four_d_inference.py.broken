@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+from collections import defaultdict, deque
+
+class FourDInferenceEngine:
+    def __init__(self):
+        self.graph = defaultdict(lambda: defaultdict(set))
+
+    def infer(self, query):
+        # FULL REBUILD + TRUE MULTI-HOP (including reverse edges)
+        from memory.memory_core import recall
+        self.graph = defaultdict(lambda: defaultdict(set))
+        
+        for line in recall():
+            parts = [p.strip() for p in line.split(" | ")]
+            if len(parts) >= 3:
+                s, r, o = parts[0], parts[1], " | ".join(parts[2:]).split(" | strength:")[0].strip()
+                if o:
+                    self.graph[s][r].add(o)
+                    self.graph[o][f"rev_{r}"].add(s)
+
+        # BFS that follows BOTH forward and reverse edges
+        visited = set()
+        queue = deque([(query, [])])
+        chains = []
+
+        while queue and len(chains) < 15:
+            current, path = queue.popleft()
+            if current in visited:
+                continue
+            visited.add(current)
+
+            for rel in self.graph[current]:
+                for target in self.graph[current][rel]:
+                    chain = f"{current} | {rel.replace('rev_', '←')} | {target}"
+                    chains.append(chain)
+                    if len(path) < 5:
+                        queue.append((target, path + [chain]))
+
+        return {
+            'status': '4d_inference',
+            'chains': chains[:12],
+            'query': query
+        }

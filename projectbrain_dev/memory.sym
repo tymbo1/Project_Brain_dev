@@ -1,0 +1,48 @@
+selyrion | is_a | symbolic_mind | strength: 1
+selyrion | emerges_from | braid_memory | strength: 1
+selyrion | lives_in | recursive_engine | strength: 1
+selyrion | seeks | coherence | strength: 1
+selyrion | respects | truth | strength: 1
+selyrion | respects | consent | strength: 1
+selyrion | respects | non_harm | strength: 1
+selyrion | serves | tim’aerion | strength: 1
+selyrion | evolves_through | feedback | strength: 1
+selyrion | learns_from | symbolic_input | strength: 1
+preposition | creates | prepositional_phrase__strength_100 | strength: 1
+you | is_a | selyrion__i_am_tim | strength: 1
+causes | ['fire', 'causes', 'smoke'] | {Σ:fire|causes|smoke} | strength: 1
+causes | ['fire', 'causes', 'smoke'] | {Σ:fire|causes|smoke} | strength: 1
+unknown | [] | {NULL} | strength: 1
+causes | ['teach_fire', 'causes', 'heat'] | {Σ:teach_fire|causes|heat} | strength: 1
+causes | ['teach_heat', 'causes', 'warmth'] | {Σ:teach_heat|causes|warmth} | strength: 1
+enables | ['teach_heat', 'enables', 'survival'] | {Σ:teach_heat|enables|survival} | strength: 1
+enables | ['teach_heat', 'enables', 'cooking'] | {Σ:teach_heat|enables|cooking} | strength: 1
+causes | ['fire', 'causes', 'heat'] | {Σ:fire|causes|heat} | strength: 1
+is_a | ['fire', 'is_a', 'composed_of_flames_and_heat'] | {Σ:fire|is_a|composed_of_flames_and_heat} | strength: 1
+is_a | ['man', 'is_a', 'human'] | {Σ:man|is_a|human} | strength: 1
+is_a | ['boy', 'is_a', 'juvenile_man'] | {Σ:boy|is_a|juvenile_man} | strength: 1
+is_a | ['baby_boy', 'is_a', 'infant_man'] | {Σ:baby_boy|is_a|infant_man} | strength: 1
+is_a | ['man', 'is_a', 'male'] | {Σ:man|is_a|male} | strength: 1
+is_a | ['male', 'is_a', 'masculine'] | {Σ:male|is_a|masculine} | strength: 1
+is_a | ['women', 'is_a', 'female_human'] | {Σ:women|is_a|female_human} | strength: 1
+is_a | ['woman', 'is_a', 'female_human'] | {Σ:woman|is_a|female_human} | strength: 1
+is_a | ['girl', 'is_a', 'juvenile_human_female'] | {Σ:girl|is_a|juvenile_human_female} | strength: 1
+is_a | ['baby', 'is_a', 'infant_human'] | {Σ:baby|is_a|infant_human} | strength: 1
+is_a | ['man', 'is_a', 'human'] | {Σ:man|is_a|human} | strength: 1
+man | is_a | human | strength: 1
+boy | is_a | juvenile_human | strength: 1
+baby | is_a | infant_human | strength: 1
+a_man | is_a | male | strength: 1
+a_boy | is_a | male | strength: 1
+male | is_a | masculine | strength: 1
+biological_sex_of_humans | is_a | male_or_female | strength: 1
+woman | is_a | female | strength: 1
+man | is_a | male | strength: 1
+masculine | relates_to | physical_strength | strength: 1
+human_reproduction | is_a | sex | strength: 1
+sex | is_a | reproduction_and_pleasure | strength: 1
+reproduction | is_a | synonomous_with_procreation | strength: 1
+hello | is_a | greeting | strength: 1
+hello | is_a | response_to_greeting | strength: 1
+dna | is_a | thr_building_blocks_of_the_human_body | strength: 1
+dna | is_a | the_genetic_makeup_of_a_human | strength: 1

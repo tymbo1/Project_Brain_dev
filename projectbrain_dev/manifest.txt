@@ -1,0 +1,15 @@
+.
+├── demo_run.sh
+├── directive_input.py
+├── inference_director.py
+├── live_trainer.py
+├── main.py
+├── manifest.txt
+├── recursive_logic_engine.py
+├── runner.py
+├── symbol_inference.py
+├── symbol_inference_director.py
+├── symbol_injector.py
+└── symbolic_engine.py
+
+1 directory, 12 files

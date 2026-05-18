@@ -1,0 +1,3 @@
+Symbolic Cognitive Engine ready. Type your statements below.
+
+You 🧬: [*] Processing input: hi

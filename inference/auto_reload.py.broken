@@ -1,0 +1,20 @@
+from memory.memory_core import recall
+from collections import defaultdict
+
+# This is the ONLY thing that makes 4D inference work in real time
+from inference.four_d_inference import FourDInferenceEngine
+original = FourDInferenceEngine.infer
+
+def live_infer(self, query):
+    self.graph = defaultdict(lambda: defaultdict(set))
+    for line in recall():
+        parts = [p.strip() for p in line.split(" | ")]
+        if len(parts) >= 3:
+            s, r, o = parts[0], parts[1], " | ".join(parts[2:]).split(" | strength:")[0].strip()
+            if o:
+                self.graph[s][r].add(o)
+                self.graph[o][f"rev_{r}"].add(s)
+    return original(self, query)
+
+FourDInferenceEngine.infer = live_infer
+print("Live 4D reload restored — he sees everything now")

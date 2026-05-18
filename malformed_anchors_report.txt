@@ -1,0 +1,255 @@
+MALFORMED ANCHOR AUDIT REPORT
+============================================================
+
+Total detected:    11801
+  MERGE:           8499
+  DELETE:          3218
+  REVIEW:          84
+
+────────────────────────────────────────────────────────────
+REVIEW REQUIRED
+────────────────────────────────────────────────────────────
+  [  6212]  'j dilla'  →  high-value merge candidate rc=6212 → 'j dilla' (exists=True)
+  [  6155]  'a priori and a posteriori'  →  fragment with high rc=6155 → 'a priori and a posteriori' (exists=True)
+  [  3393]  '_ life'  →  high-value merge candidate rc=3393 → 'life' (exists=True)
+  [  3139]  'god''  →  high-value merge candidate rc=3139 → 'god' (exists=True)
+  [  2922]  '- spirit'  →  high-value merge candidate rc=2922 → 'spirit' (exists=True)
+  [  2848]  'r package'  →  high-value merge candidate rc=2848 → 'r package' (exists=True)
+  [  2712]  't cell'  →  high-value merge candidate rc=2712 → 't cell' (exists=True)
+  [  2622]  'g protein-coupled receptor'  →  high-value merge candidate rc=2622 → 'g protein-coupled receptor' (exists=True)
+  [  2144]  'bed''  →  high-value merge candidate rc=2144 → 'bed' (exists=True)
+  [  1312]  '- water'  →  high-value merge candidate rc=1312 → 'water' (exists=True)
+  [  1234]  '- understand'  →  high-value merge candidate rc=1234 → 'understand' (exists=True)
+  [  1108]  '1 present being and his reflection'  →  fragment with high rc=1108 → '1 present being and his reflection' (exists=True)
+  [  1108]  '9 this matter'  →  high-value merge candidate rc=1108 → '9 this matter' (exists=True)
+  [  1095]  'b cell'  →  high-value merge candidate rc=1095 → 'b cell' (exists=True)
+  [   854]  'p 885 an edition bearing the date 1565'  →  fragment with high rc=854 → 'p 885 an edition bearing the date 1565' (exists=True)
+  [   725]  '6 a seed or a flower'  →  fragment with high rc=725 → '6 a seed or a flower' (exists=True)
+  [   693]  '4 to all verbs in the language'  →  fragment with high rc=693 → '4 to all verbs in the language' (exists=True)
+  [   624]  'gtp''  →  high-value merge candidate rc=624 → 'gtp' (exists=True)
+  [   540]  '_ fear'  →  high-value merge candidate rc=540 → 'fear' (exists=True)
+  [   447]  'john '  →  high-value merge candidate rc=447 → 'john' (exists=True)
+  [   442]  'g protein'  →  high-value merge candidate rc=442 → 'g protein' (exists=True)
+  [   419]  '- government'  →  high-value merge candidate rc=419 → 'government' (exists=True)
+  [   377]  'x chromosome'  →  high-value merge candidate rc=377 → 'x chromosome' (exists=True)
+  [   346]  '1 everything'  →  high-value merge candidate rc=346 → '1 everything' (exists=True)
+  [   346]  '1 sensation'  →  high-value merge candidate rc=346 → '1 sensation' (exists=True)
+  [   324]  '1 life or health'  →  high-value merge candidate rc=324 → '1 life or health' (exists=True)
+  [   313]  'g protein-coupled bile acid receptor'  →  high-value merge candidate rc=313 → 'g protein-coupled bile acid receptor' (exists=True)
+  [   295]  'lady '  →  high-value merge candidate rc=295 → 'lady' (exists=True)
+  [   292]  'y chromosome'  →  high-value merge candidate rc=292 → 'y chromosome' (exists=True)
+  [   291]  '6 the heart and soul of christian science'  →  fragment with high rc=291 → '6 the heart and soul of christian science' (exists=True)
+  [   289]  '2 so shar'  →  high-value merge candidate rc=289 → '2 so shar' (exists=True)
+  [   289]  'v 1 the knowledge of man'  →  fragment with high rc=289 → 'v 1 the knowledge of man' (exists=True)
+  [   288]  'control '  →  high-value merge candidate rc=288 → 'control' (exists=True)
+  [   287]  'e learning'  →  high-value merge candidate rc=287 → 'e learning' (exists=True)
+  [   274]  't tauri star'  →  high-value merge candidate rc=274 → 't tauri star' (exists=True)
+  [   228]  'strong '  →  high-value merge candidate rc=228 → 'strong' (exists=True)
+  [   214]  '6 god'  →  high-value merge candidate rc=214 → '6 god' (exists=True)
+  [   214]  'q fever'  →  high-value merge candidate rc=214 → 'q fever' (exists=True)
+  [   203]  '2 every- thing'  →  high-value merge candidate rc=203 → '2 every- thing' (exists=True)
+  [   203]  '6 the real jurisdiction of the world'  →  fragment with high rc=203 → '6 the real jurisdiction of the world' (exists=True)
+  [   198]  'confusion '  →  high-value merge candidate rc=198 → 'confusion' (exists=True)
+  [   195]  'g protein-coupled receptor kinase'  →  high-value merge candidate rc=195 → 'g protein-coupled receptor kinase' (exists=True)
+  [   181]  'g alpha subunit'  →  high-value merge candidate rc=181 → 'g alpha subunit' (exists=True)
+  [   158]  'q factor'  →  high-value merge candidate rc=158 → 'q factor' (exists=True)
+  [   154]  '_ white'  →  high-value merge candidate rc=154 → 'white' (exists=True)
+  [   140]  'real '  →  high-value merge candidate rc=140 → 'real' (exists=True)
+  [   135]  'due '  →  high-value merge candidate rc=135 → 'due' (exists=True)
+  [   118]  '3 reality'  →  high-value merge candidate rc=118 → '3 reality' (exists=True)
+  [   116]  '_ salvation'  →  high-value merge candidate rc=116 → 'salvation' (exists=True)
+  [   116]  'sister '  →  high-value merge candidate rc=116 → 'sister' (exists=True)
+  [   115]  'h bridge'  →  high-value merge candidate rc=115 → 'h bridge' (exists=True)
+  [   114]  'w state'  →  high-value merge candidate rc=114 → 'w state' (exists=True)
+  [   114]  'r gene'  →  high-value merge candidate rc=114 → 'r gene' (exists=True)
+  [   113]  'b vitamins'  →  high-value merge candidate rc=113 → 'b vitamins' (exists=True)
+  [   102]  '9 unillumined human mind the vision'  →  fragment with high rc=102 → '9 unillumined human mind the vision' (exists=True)
+  [    96]  'around '  →  high-value merge candidate rc=96 → 'around' (exists=True)
+  [    95]  'about '  →  high-value merge candidate rc=95 → 'about' (exists=True)
+  [    93]  't helper cell'  →  high-value merge candidate rc=93 → 't helper cell' (exists=True)
+  [    91]  'henry '  →  high-value merge candidate rc=91 → 'henry' (exists=True)
+  [    91]  '2 chainz'  →  high-value merge candidate rc=91 → '2 chainz' (exists=True)
+  [    90]  '3 imperishable glory -'  →  high-value merge candidate rc=90 → '3 imperishable glory -' (exists=True)
+  [    89]  'g protein-coupled inwardly-rectifying potassium channel'  →  high-value merge candidate rc=89 → 'g protein-coupled inwardly-rectifying potassium channel' (exists=True)
+  [    86]  's transform'  →  high-value merge candidate rc=86 → 's transform' (exists=True)
+  [    83]  '9 not far removed from infidelity'  →  fragment with high rc=83 → '9 not far removed from infidelity' (exists=True)
+  [    80]  't helper cell dependent affinity maturati'  →  fragment with high rc=80 → 't helper cell dependent affinity maturati' (exists=True)
+  [    80]  'b cell-dominated humoral immunity'  →  high-value merge candidate rc=80 → 'b cell-dominated humoral immunity' (exists=True)
+  [    79]  '_ troop'  →  high-value merge candidate rc=79 → 'troop' (exists=True)
+  [    78]  '3 death'  →  high-value merge candidate rc=78 → '3 death' (exists=True)
+  [    78]  '1 every sort of sickness'  →  high-value merge candidate rc=78 → '1 every sort of sickness' (exists=True)
+  [    76]  's voice'  →  high-value merge candidate rc=76 → 's voice' (exists=True)
+  [    75]  'normal '  →  high-value merge candidate rc=75 → 'normal' (exists=True)
+  [    69]  'k shortest path routing'  →  high-value merge candidate rc=69 → 'k shortest path routing' (exists=True)
+  [    67]  'extreme '  →  high-value merge candidate rc=67 → 'extreme' (exists=True)
+  [    66]  'peg''  →  high-value merge candidate rc=66 → 'peg' (exists=True)
+  [    64]  'a combined corner and edge detector'  →  fragment with high rc=64 → 'a combined corner and edge detector' (exists=True)
+  [    64]  'a perspective on cancer cell metastasis'  →  fragment with high rc=64 → 'a perspective on cancer cell metastasis' (exists=True)
+  [    58]  'w chromosome'  →  high-value merge candidate rc=58 → 'w chromosome' (exists=True)
+  [    58]  'a behavioral theory of the firm'  →  fragment with high rc=58 → 'a behavioral theory of the firm' (exists=True)
+  [    57]  'g band'  →  high-value merge candidate rc=57 → 'g band' (exists=True)
+  [    56]  'p element'  →  high-value merge candidate rc=56 → 'p element' (exists=True)
+  [    55]  'n people'  →  high-value merge candidate rc=55 → 'n people' (exists=True)
+  [    55]  'her''  →  high-value merge candidate rc=55 → 'her' (exists=True)
+  [    54]  'c programming language'  →  high-value merge candidate rc=54 → 'c programming language' (exists=True)
+  [    50]  't arm'  →  high-value merge candidate rc=50 → 't arm' (exists=True)
+
+────────────────────────────────────────────────────────────
+TOP MERGE CANDIDATES
+────────────────────────────────────────────────────────────
+  [    48]  'h company'  →  'h company'  [EXISTS]
+  [    48]  'j integral'  →  'j integral'  [EXISTS]
+  [    47]  'ufo''  →  'ufo'  [EXISTS]
+  [    47]  'g beta-gamma complex'  →  'g beta-gamma complex'  [EXISTS]
+  [    46]  'f region'  →  'f region'  [EXISTS]
+  [    45]  '_ goodness'  →  'goodness'  [EXISTS]
+  [    45]  'c band'  →  'c band'  [EXISTS]
+  [    44]  'fag''  →  'fag'  [EXISTS]
+  [    43]  'c difficile'  →  'c difficile'  [EXISTS]
+  [    42]  'l tibetanus the ear'  →  'l tibetanus the ear'  [EXISTS]
+  [    41]  'y therefore and similarly y'  →  'y therefore and similarly y'  [EXISTS]
+  [    40]  'william '  →  'william'  [EXISTS]
+  [    40]  'b chromosome'  →  'b chromosome'  [EXISTS]
+  [    39]  'developing effective disease management '  →  'developing effective disease management'  [NEW]
+  [    39]  't shirt'  →  't shirt'  [EXISTS]
+  [    38]  'j chain'  →  'j chain'  [EXISTS]
+  [    37]  't cell exhaustion'  →  't cell exhaustion'  [EXISTS]
+  [    37]  'y chromosome microdeletion'  →  'y chromosome microdeletion'  [EXISTS]
+  [    36]  '_ much is achieved merely'  →  'much is achieved merely'  [NEW]
+  [    35]  '6 mortal existence'  →  '6 mortal existence'  [EXISTS]
+  [    35]  'you''  →  'you'  [EXISTS]
+  [    35]  'x ray'  →  'x ray'  [EXISTS]
+  [    34]  '3 not real'  →  '3 not real'  [EXISTS]
+  [    34]  't lymphocyte'  →  't lymphocyte'  [EXISTS]
+  [    33]  'des'''  →  'des'  [EXISTS]
+  [    33]  'c number'  →  'c number'  [EXISTS]
+  [    32]  'method of diluting or 'potentizing''  →  'method of diluting or 'potentizing'  [NEW]
+  [    31]  'b c and d'  →  'b c and d'  [EXISTS]
+  [    30]  'p and l'  →  'p and l'  [EXISTS]
+  [    29]  'pro''  →  'pro'  [EXISTS]
+  [    29]  'benjamin '  →  'benjamin'  [EXISTS]
+  [    28]  'james '  →  'james'  [EXISTS]
+  [    27]  'b meson'  →  'b meson'  [EXISTS]
+  [    26]  'μ operator'  →  'μ operator'  [EXISTS]
+  [    25]  'jacob '  →  'jacob'  [EXISTS]
+  [    25]  'c parity'  →  'c parity'  [EXISTS]
+  [    24]  'c sharp (programming language)'  →  'c sharp (programming language)'  [EXISTS]
+  [    24]  'r programming language'  →  'r programming language'  [EXISTS]
+  [    24]  'x ray radiation'  →  'x ray radiation'  [EXISTS]
+  [    22]  's phase'  →  's phase'  [EXISTS]
+  [    21]  '2 the longitude problem'  →  '2 the longitude problem'  [EXISTS]
+  [    21]  'd (programming language)'  →  'd (programming language)'  [EXISTS]
+  [    21]  't wave alternans'  →  't wave alternans'  [EXISTS]
+  [    19]  '- argentina'  →  'argentina'  [EXISTS]
+  [    19]  's disease'  →  's disease'  [EXISTS]
+  [    19]  't wave'  →  't wave'  [EXISTS]
+  [    19]  'j wave'  →  'j wave'  [EXISTS]
+  [    18]  '2 unlimited'  →  '2 unlimited'  [EXISTS]
+  [    18]  'v (programming language)'  →  'v (programming language)'  [EXISTS]
+  [    18]  'u turn'  →  'u turn'  [EXISTS]
+  [    18]  'n cadherin'  →  'n cadherin'  [EXISTS]
+  [    18]  'g factor'  →  'g factor'  [EXISTS]
+  [    17]  '3 life'  →  '3 life'  [EXISTS]
+  [    17]  'n word'  →  'n word'  [EXISTS]
+  [    17]  'p adic norm'  →  'p adic norm'  [EXISTS]
+  [    17]  's process'  →  's process'  [EXISTS]
+  [    17]  'β amyloid'  →  'β amyloid'  [EXISTS]
+  [    17]  'm squared'  →  'm squared'  [EXISTS]
+  [    16]  '1 nothing'  →  '1 nothing'  [EXISTS]
+  [    16]  '1 know these ideal'  →  '1 know these ideal'  [EXISTS]
+  [    16]  'b until both lin'  →  'b until both lin'  [EXISTS]
+  [    16]  'v mail'  →  'v mail'  [EXISTS]
+  [    16]  'v sign'  →  'v sign'  [EXISTS]
+  [    16]  'j neuropsychiatry clin neurosci'  →  'j neuropsychiatry clin neurosci'  [EXISTS]
+  [    16]  'b lymphocytes secrete antigen-presenting vesicles.'  →  'b lymphocytes secrete antigen-presenting vesicles.'  [EXISTS]
+  [    16]  'l band'  →  'l band'  [EXISTS]
+  [    15]  'd alembert's paradox'  →  'd alembert's paradox'  [EXISTS]
+  [    15]  'f wave'  →  'f wave'  [EXISTS]
+  [    14]  '1 and body'  →  '1 and body'  [EXISTS]
+  [    14]  '1 called mind'  →  '1 called mind'  [EXISTS]
+  [    14]  'i ching'  →  'i ching'  [EXISTS]
+  [    14]  'p adic absolute value'  →  'p adic absolute value'  [EXISTS]
+  [    14]  'r r'  →  'r r'  [EXISTS]
+  [    14]  'p wave'  →  'p wave'  [EXISTS]
+  [    14]  't tubule'  →  't tubule'  [EXISTS]
+  [    14]  'b word'  →  'b word'  [EXISTS]
+  [    14]  'k line'  →  'k line'  [EXISTS]
+  [    14]  'm ratio'  →  'm ratio'  [EXISTS]
+  [    14]  'x ray diffraction'  →  'x ray diffraction'  [EXISTS]
+  [    14]  '2 methyl 1,3,5 trinitrobenzene'  →  '2 methyl 1,3,5 trinitrobenzene'  [EXISTS]
+  [    13]  'sporothrix genus with '  →  'sporothrix genus with'  [NEW]
+  [    13]  'j (programming language)'  →  'j (programming language)'  [EXISTS]
+  [    13]  'k (programming language)'  →  'k (programming language)'  [EXISTS]
+  [    13]  'e mail'  →  'e mail'  [EXISTS]
+  [    13]  'f word'  →  'f word'  [EXISTS]
+  [    13]  'r rated'  →  'r rated'  [EXISTS]
+  [    13]  'm theory'  →  'm theory'  [EXISTS]
+  [    13]  'q carbon'  →  'q carbon'  [EXISTS]
+  [    13]  'g string'  →  'g string'  [EXISTS]
+  [    13]  'p 2 orbit'  →  'p 2 orbit'  [EXISTS]
+  [    13]  'q analog'  →  'q analog'  [EXISTS]
+  [    13]  't word'  →  't word'  [EXISTS]
+  [    13]  'μ oxido dihydrogen'  →  'μ oxido dihydrogen'  [EXISTS]
+  [    13]  's train'  →  's train'  [EXISTS]
+  [    13]  't symmetry'  →  't symmetry'  [EXISTS]
+  [    12]  'islands of vancouver''  →  'islands of vancouver'  [NEW]
+  [    12]  'meanwhile 'london particular''  →  'meanwhile 'london particular'  [NEW]
+  [    12]  'brahminee religion and your lordship''  →  'brahminee religion and your lordship'  [NEW]
+  [    12]  'point of the 'wheeze''  →  'point of the 'wheeze'  [NEW]
+  [    12]  '8 ball'  →  '8 ball'  [EXISTS]
+  ... 8399 more in TSV
+
+────────────────────────────────────────────────────────────
+TOP DELETE CANDIDATES
+────────────────────────────────────────────────────────────
+  [    49]  'd 1870 _cf_ mirbt n 509'  (sentence fragment)
+  [    48]  'a theory of cognitive dissonance'  (sentence fragment)
+  [    48]  'a feature-integration theory of attention'  (sentence fragment)
+  [    48]  'a three-component conceptualization of organizational commitment'  (sentence fragment)
+  [    48]  'a cognitive approach to language learning'  (sentence fragment)
+  [    48]  'a modified particle swarm optimizer'  (sentence fragment)
+  [    48]  'a global double‐fluorescent cre reporter mouse'  (sentence fragment)
+  [    48]  'a soil-adjusted vegetation index (savi)'  (sentence fragment)
+  [    43]  't poo-poo and the red queen'  (sentence fragment)
+  [    41]  's phase entry and meiotic gene activation'  (sentence fragment)
+  [    34]  'g 1/07'  (sentence fragment)
+  [    32]  'a 12-item short-form health survey'  (sentence fragment)
+  [    32]  'a default mode of brain function'  (sentence fragment)
+  [    32]  'a handbook of child psychology'  (sentence fragment)
+  [    32]  'a diagnostic interview'  (sentence fragment)
+  [    32]  'a theory of cortical responses'  (sentence fragment)
+  [    32]  'a framework for representing knowledge'  (sentence fragment)
+  [    32]  'a children's global assessment scale (cgas)'  (sentence fragment)
+  [    32]  'a cognitive theory of consciousness'  (sentence fragment)
+  [    32]  'a proposed mechanism of emotion'  (sentence fragment)
+  [    32]  'a theory of cerebellar cortex'  (sentence fragment)
+  [    32]  'g proteins: transducers of receptor-generated signals'  (sentence fragment)
+  [    32]  'a toll-like receptor recognizes bacterial dna'  (sentence fragment)
+  [    32]  'a genomic perspective on protein families'  (sentence fragment)
+  [    32]  'a literature review of poly(lactic acid)'  (sentence fragment)
+  [    32]  'a census of human cancer genes'  (sentence fragment)
+  [    32]  'a sentimental education'  (sentence fragment)
+  [    32]  'a theory of biological pattern formation'  (sentence fragment)
+  [    32]  'a simplex method for function minimization'  (sentence fragment)
+  [    32]  'a tutorial on support vector regression'  (sentence fragment)
+  [    32]  'a stochastic approximation method'  (sentence fragment)
+  [    32]  'a cluster separation measure'  (sentence fragment)
+  [    32]  'a performance evaluation of local descriptors'  (sentence fragment)
+  [    32]  'a natural-resource-based view of the firm'  (sentence fragment)
+  [    32]  'a new metaheuristic bat-inspired algorithm'  (sentence fragment)
+  [    32]  'a trophic state index for lakes1'  (sentence fragment)
+  [    32]  'a modified soil adjusted vegetation index'  (sentence fragment)
+  [    32]  'a real-time qrs detection algorithm'  (sentence fragment)
+  [    32]  'a course of modern analysis'  (sentence fragment)
+  [    29]  'a priori estimate'  (sentence fragment)
+  [    28]  'a theory of social comparison processes'  (sentence fragment)
+  [    28]  'a quantitative approach to content validity<sup>1</sup>'  (sentence fragment)
+  [    28]  'a genetic model for colorectal tumorigenesis'  (sentence fragment)
+  [    28]  'a safe operating space for humanity'  (sentence fragment)
+  [    28]  'a survey on sensor networks'  (sentence fragment)
+  [    28]  'a mathematical theory of communication'  (sentence fragment)
+  [    24]  'a power primer.'  (sentence fragment)
+  [    24]  'a spreading-activation theory of semantic processing.'  (sentence fragment)
+  [    24]  'a social psychologist discovers chicago sociology'  (sentence fragment)
+  [    24]  'a theory of memory retrieval.'  (sentence fragment)
+  ... 3168 more in TSV
