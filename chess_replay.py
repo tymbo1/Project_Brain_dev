@@ -56,7 +56,7 @@ parser.add_argument("--synth-db",      default=str(Path.home() / "selyrion_synth
 parser.add_argument("--batch",         action="store_true", help="No pausing between games")
 parser.add_argument("--resume",        action="store_true",
                     help="Skip games already replayed (has parliament_move_deliberations)")
-parser.add_argument("--models",        default="llama3:8b,gemma3:4b,phi4-mini",
+parser.add_argument("--models",        default="llama3.1:8b,gemma3:4b,phi4-mini",
                     help="LLM parliament models (qwen3 excluded by default — slow)")
 parser.add_argument("--stockfish-depth", type=int, default=15,
                     help="Stockfish search depth for parliamentary analysis")
@@ -83,13 +83,15 @@ CMS  = "\033[35m"; LLM  = "\033[36m"; SEL = "\033[38;5;141m"
 SF   = "\033[38;5;214m"  # Stockfish orange
 
 MODEL_COLORS = {
+    "llama3.1:8b": "\033[36m",
     "llama3:8b":  "\033[36m",
     "gemma3:4b":  "\033[38;5;141m",
     "phi4-mini":  "\033[33m",
     "qwen3:4b":   "\033[38;5;214m",
 }
 MODEL_ROLES = {
-    "llama3:8b":  "synthesis arbitrator — weigh all perspectives, seek integration",
+    "llama3.1:8b": "synthesis arbitrator — compare the engine line vs historical move, name EXACTLY which you prefer and WHY in concrete chess terms (piece activity, pawn structure, king safety). No vague language.",
+    "llama3:8b":  "synthesis arbitrator — compare the engine line vs historical move, name EXACTLY which you prefer and WHY in concrete chess terms (piece activity, pawn structure, king safety). No vague language.",
     "gemma3:4b":  "symbolic resonance — attend to meaning, metaphor, conceptual depth",
     "phi4-mini":  "analytical discipline — precise reasoning, structured logic",
     "qwen3:4b":   "broad knowledge — history, theory, comparative evidence",
@@ -349,9 +351,19 @@ def parliament_position(board: chess.Board, sf_report: dict,
         print(f"  {col}{model:20}{R}", end=" ", flush=True)
         role = MODEL_ROLES.get(model, "independent reasoner")
 
+        llama_instruction = ""
+        if model == "llama3:8b":
+            llama_instruction = f"""
+REQUIRED: You must name a specific move in proposed_move. You must state exactly ONE concrete
+reason why you prefer it over the alternative (e.g. "opens the f-file for the rook",
+"fixes the backward pawn on d6", "forces the king to a worse square"). Generic phrases like
+"complex strategic landscape" or "opportunities for counterplay" are forbidden.
+Engine says: {" ".join(sf_report.get("pv", [])[:2])}. Historical was: {historical_move}.
+Pick one. Justify it in chess terms."""
+
         prompt = f"""You are a chess parliament member analyzing a historical game position.
 Your role: {role}
-
+{llama_instruction}
 Position (FEN): {fen}
 It is {color_name}'s turn.
 
@@ -369,8 +381,8 @@ Extract any causal insights as proposed relations.
 
 Respond in JSON only:
 {{
-  "conclusion": "your strategic assessment (2-3 sentences)",
-  "proposed_move": "the move you'd recommend in this position",
+  "conclusion": "NAME your recommended move first, then give ONE concrete chess reason (e.g. 'I recommend Kf5 because it centralises the king and controls the e4 square'). No generic phrases.",
+  "proposed_move": "the move you'd recommend in this position (SAN notation)",
   "agrees_with_engine": true or false,
   "agrees_with_historical": true or false,
   "reasoning": "your reasoning (2-3 sentences)",
