@@ -40,6 +40,9 @@ parser.add_argument("--stats",      action="store_true", help="Show chess DB sta
 parser.add_argument("--annotated",  action="store_true",
                     help="Deep annotation extraction: per-move comments, causal relations, "
                          "rejected candidates. Uses python-chess parser.")
+parser.add_argument("--re-annotate", action="store_true",
+                    help="Force annotation extraction on already-ingested games "
+                         "(implies --annotated, skips game/move record writes).")
 parser.add_argument("--verbose",    action="store_true")
 args = parser.parse_args()
 
@@ -759,6 +762,48 @@ def process_game(game: dict, conn: sqlite3.Connection,
                     UPDATE chess_games SET white_accuracy=?, black_accuracy=?
                     WHERE id=?
                 """, (wa_f, ba_f, gid))
+
+        # Re-annotate path: extract causal relations from already-ingested games
+        if args.re_annotate and game.get("_rich"):
+            already = conn.execute(
+                "SELECT COUNT(*) FROM chess_annotation_relations WHERE game_id=?", (gid,)
+            ).fetchone()[0]
+            if already == 0:
+                ann_rels = []
+                for mv in game["moves"]:
+                    c = mv.get("comment", "") or ""
+                    side = mv.get("side", "white")
+                    ply  = mv.get("ply", 0)
+                    ann_rels += extract_annotation_relations(c, gid, ply, side)
+                    ann_rels += detect_rejected_candidates(c, gid, ply, side)
+                    for vc in mv.get("var_comments", []):
+                        ann_rels += detect_rejected_candidates(vc, gid, ply, side)
+                for ar in ann_rels:
+                    ar_id = hashlib.md5(
+                        f"{gid}:{ar['ply']}:{ar['subject']}:{ar['predicate']}:{ar['object']}".encode()
+                    ).hexdigest()[:14]
+                    conn.execute("""
+                        INSERT OR IGNORE INTO chess_annotation_relations
+                            (id, game_id, ply, side, subject, predicate, object,
+                             confidence, is_rejected, source_text, ingested_at)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                    """, (ar_id, gid, ar["ply"], ar.get("side"),
+                          ar["subject"], ar["predicate"], ar["object"],
+                          ar["confidence"], int(ar.get("is_rejected", False)),
+                          ar.get("source_text", "")[:300], time.time()))
+                    subj_row = conn.execute(
+                        "SELECT id FROM anchors WHERE canonical=? LIMIT 1",
+                        (ar["subject"],)).fetchone()
+                    obj_row = conn.execute(
+                        "SELECT id FROM anchors WHERE canonical=? LIMIT 1",
+                        (ar["object"],)).fetchone()
+                    if subj_row and obj_row:
+                        write_relation(conn, subj_row[0], ar["predicate"],
+                                       obj_row[0], conf=ar["confidence"])
+                conn.commit()
+                return {"skipped": False, "id": gid, "relations": len(ann_rels),
+                        "motifs": [], "re_annotated": True}
+
         return {"skipped": True, "id": gid}
 
     # Resolve opening
@@ -855,6 +900,9 @@ def process_game(game: dict, conn: sqlite3.Connection,
                 annotation_rels += detect_rejected_candidates(
                     vc, gid, ply, side)
 
+    # Build relations from game evidence
+    relations_added = 0
+
     # Write annotation-sourced relations
     for ar in annotation_rels:
         ar_id = hashlib.md5(
@@ -881,9 +929,6 @@ def process_game(game: dict, conn: sqlite3.Connection,
             write_relation(conn, subj_row[0], ar["predicate"], obj_row[0],
                            conf=ar["confidence"])
             relations_added += 1
-
-    # Build relations from game evidence
-    relations_added = 0
 
     # Player × opening relations (seen playing this opening)
     for player_aid_val, player_can, side in [
@@ -1029,8 +1074,9 @@ def main():
         return
 
     print(f"\n  Reading {pgn_path} ...")
-    if args.annotated:
-        print(f"  Mode: annotated (python-chess, per-move comments + causal extraction)")
+    if args.annotated or args.re_annotate:
+        print(f"  Mode: {'re-annotate' if args.re_annotate else 'annotated'} "
+              f"(python-chess, per-move comments + causal extraction)")
         games = parse_pgn_rich(str(pgn_path))
     else:
         text = pgn_path.read_text(errors="replace")

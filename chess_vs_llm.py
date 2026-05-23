@@ -615,9 +615,6 @@ def write_move(conn, sess_id, ply, move, san, board_after, color, narration):
         VALUES (?,?,?,?,?,?,?,?,?,?)
     """, (f"{sess_id}:{ply}", sess_id, ply, san, move.uci(),
           color, narration, json.dumps(motifs), board_after.fen(), time.time()))
-    for motif in motifs:
-        conn.execute("""UPDATE anchors SET maturity = maturity + 0.05
-                        WHERE canonical=? AND domain_tags LIKE '%chess%'""", (motif,))
     conn.commit()
     return motifs
 

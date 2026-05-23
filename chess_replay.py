@@ -1,0 +1,848 @@
+#!/usr/bin/env python3
+"""
+chess_replay.py — Experiential replay of ingested games with parliament deliberation.
+
+Replays historical games position-by-position. At turning points (eval shift > threshold)
+and every N plies, runs full parliament deliberation with Stockfish as epistemic anchor.
+
+Parliament members:
+  LLMs              — strategic reasoning, symbolic abstraction
+  Stockfish         — tactical reality anchor (not a language participant)
+  CMS               — persistent causal context (injected, not a speaker)
+
+Stores per-position reasoning provenance in parliament_move_deliberations.
+Compares parliament proposals to historical moves and engine best.
+Writes validated insights to synth.db for HITL merge to CMS.
+Mirrors summaries to claudecode.db as discoveries.
+
+Usage:
+  python3 chess_replay.py --games 50                    # replay 50 games from DB
+  python3 chess_replay.py --game-id game.abc123          # replay specific game
+  python3 chess_replay.py --pgn myfile.pgn              # replay from PGN file
+  python3 chess_replay.py --games 100 --batch            # batch mode (no pausing)
+  python3 chess_replay.py --games 0 --stats             # show replay stats
+  python3 chess_replay.py --resume                       # resume interrupted batch
+"""
+
+import sys, re, json, sqlite3, hashlib, time, argparse, shutil
+from pathlib import Path
+from collections import defaultdict
+from datetime import datetime
+
+try:
+    import chess, chess.pgn, chess.engine
+except ImportError:
+    import subprocess
+    subprocess.check_call([sys.executable, "-m", "pip", "install",
+                           "python-chess", "-q", "--break-system-packages"])
+    import chess, chess.pgn, chess.engine
+
+try:
+    import requests
+except ImportError:
+    import subprocess
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "requests", "-q"])
+    import requests
+
+# ── CLI ───────────────────────────────────────────────────────────────────────
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--games",         type=int, default=10,
+                    help="Number of games to replay (0=stats only)")
+parser.add_argument("--game-id",       default=None, help="Replay a specific game by ID")
+parser.add_argument("--pgn",           default=None, help="Replay from PGN file instead of DB")
+parser.add_argument("--db",            default=str(Path.home() / "resonance_v11.db"))
+parser.add_argument("--synth-db",      default=str(Path.home() / "selyrion_synth.db"))
+parser.add_argument("--batch",         action="store_true", help="No pausing between games")
+parser.add_argument("--resume",        action="store_true",
+                    help="Skip games already replayed (has parliament_move_deliberations)")
+parser.add_argument("--models",        default="llama3:8b,gemma3:4b,phi4-mini",
+                    help="LLM parliament models (qwen3 excluded by default — slow)")
+parser.add_argument("--stockfish-depth", type=int, default=15,
+                    help="Stockfish search depth for parliamentary analysis")
+parser.add_argument("--think-time",    type=float, default=0.3,
+                    help="Stockfish think time per position")
+parser.add_argument("--deliberate-every", type=int, default=6,
+                    help="Run parliament every N plies (in addition to turning points)")
+parser.add_argument("--eval-threshold", type=float, default=0.5,
+                    help="Centipawn shift to trigger turning-point parliament (in pawns)")
+parser.add_argument("--no-parliament", action="store_true",
+                    help="Skip LLM parliament, only do Stockfish eval + turning point detection")
+parser.add_argument("--stats",         action="store_true")
+parser.add_argument("--dry-run",       action="store_true")
+parser.add_argument("--verbose",       action="store_true")
+args = parser.parse_args()
+
+OLLAMA_URL = "http://localhost:11434/api/generate"
+MODELS     = [m.strip() for m in args.models.split(",") if m.strip()]
+
+# ── ANSI ──────────────────────────────────────────────────────────────────────
+R    = "\033[0m";  BOLD = "\033[1m";  DIM = "\033[2m"
+OK   = "\033[32m"; WARN = "\033[33m"; ERR = "\033[31m"
+CMS  = "\033[35m"; LLM  = "\033[36m"; SEL = "\033[38;5;141m"
+SF   = "\033[38;5;214m"  # Stockfish orange
+
+MODEL_COLORS = {
+    "llama3:8b":  "\033[36m",
+    "gemma3:4b":  "\033[38;5;141m",
+    "phi4-mini":  "\033[33m",
+    "qwen3:4b":   "\033[38;5;214m",
+}
+MODEL_ROLES = {
+    "llama3:8b":  "synthesis arbitrator — weigh all perspectives, seek integration",
+    "gemma3:4b":  "symbolic resonance — attend to meaning, metaphor, conceptual depth",
+    "phi4-mini":  "analytical discipline — precise reasoning, structured logic",
+    "qwen3:4b":   "broad knowledge — history, theory, comparative evidence",
+}
+VALID_PREDICATES = {
+    "leads_to", "enables", "causes", "weakens", "strengthens", "requires",
+    "produces", "results_in", "restricts", "exposes", "threatens", "inhibits",
+    "activates", "transforms", "depends_on", "emerges_from", "regulates",
+}
+
+_CLAUDECODE_DB = str(Path.home() / "claudecode.db")
+
+
+# ── Stockfish helpers ─────────────────────────────────────────────────────────
+
+def find_stockfish() -> str:
+    p = shutil.which("stockfish")
+    if p:
+        return p
+    for c in ["/usr/games/stockfish", "/usr/local/bin/stockfish"]:
+        if Path(c).exists():
+            return c
+    return None
+
+
+def stockfish_report(engine: chess.engine.SimpleEngine,
+                     board: chess.Board,
+                     depth: int = 15,
+                     think_time: float = 0.3) -> dict:
+    """Get structured tactical report from Stockfish for the current position."""
+    info = engine.analyse(board, chess.engine.Limit(depth=depth, time=think_time),
+                          multipv=3)
+
+    if not info:
+        return {"eval": 0.0, "pv": [], "eval_str": "0.00", "report": "No analysis"}
+
+    best = info[0]
+    score = best["score"].white()
+
+    if score.is_mate():
+        eval_f = 10.0 if score.mate() > 0 else -10.0
+        eval_str = f"M{score.mate()}"
+    else:
+        eval_f = score.cp / 100.0
+        eval_str = f"{eval_f:+.2f}"
+
+    # Build PV string (first 6 moves)
+    pv_moves = []
+    pv_board = board.copy()
+    for mv in best.get("pv", [])[:6]:
+        try:
+            pv_moves.append(pv_board.san(mv))
+            pv_board.push(mv)
+        except Exception:
+            break
+
+    # Multi-PV: candidate moves with evals
+    candidates = []
+    for line in info[:3]:
+        sc = line["score"].white()
+        if sc.is_mate():
+            ceval = f"M{sc.mate()}"
+        else:
+            ceval = f"{sc.cp/100:+.2f}"
+        cv = line.get("pv", [])
+        if cv:
+            try:
+                cmove = board.san(cv[0])
+                candidates.append(f"{cmove} ({ceval})")
+            except Exception:
+                pass
+
+    color_name = "White" if board.turn == chess.WHITE else "Black"
+    adv = "advantage" if eval_f > 0 else "disadvantage"
+    if abs(eval_f) < 0.3:
+        adv = "roughly equal"
+
+    report = (
+        f"STOCKFISH TACTICAL ANALYSIS (depth={depth}):\n"
+        f"  Evaluation: {eval_str} ({color_name} {adv})\n"
+        f"  Best continuation: {' '.join(pv_moves)}\n"
+        f"  Top candidates: {', '.join(candidates)}\n"
+        f"  FEN: {board.fen()}"
+    )
+
+    return {
+        "eval":      eval_f,
+        "eval_str":  eval_str,
+        "pv":        pv_moves,
+        "candidates": candidates,
+        "report":    report,
+    }
+
+
+# ── CMS context ───────────────────────────────────────────────────────────────
+
+def build_cms_context(conn: sqlite3.Connection, white: str, black: str,
+                      opening: str) -> str:
+    parts = []
+
+    rows = conn.execute("""
+        SELECT a1.canonical, r.predicate, a2.canonical
+        FROM relations_aggregated r
+        JOIN anchors a1 ON r.subject_id = a1.id
+        JOIN anchors a2 ON r.object_id  = a2.id
+        WHERE (a1.domain_tags LIKE '%chess%' OR a2.domain_tags LIKE '%chess%')
+          AND r.confidence > 0.72 AND r.seen_count > 2
+        ORDER BY r.seen_count DESC, r.confidence DESC LIMIT 10
+    """).fetchall()
+    if rows:
+        parts.append("Chess CMS relations: " +
+                     "; ".join(f"{s} {p} {o}" for s, p, o in rows))
+
+    refl = conn.execute("""
+        SELECT strategic_identity, lesson FROM chess_reflections
+        ORDER BY reflected_at DESC LIMIT 3
+    """).fetchall()
+    if refl:
+        parts.append("Recent lessons: " +
+                     " | ".join(f"{r[0]}: {r[1]}" for r in refl if r[1]))
+
+    if opening:
+        parts.append(f"Opening: {opening}")
+
+    return "\n".join(parts) if parts else "Chess CMS context sparse."
+
+
+# ── Parliament LLM call ───────────────────────────────────────────────────────
+
+def _llm(model: str, prompt: str, temperature: float = 0.5) -> str:
+    try:
+        r = requests.post(OLLAMA_URL, json={
+            "model": model, "prompt": prompt,
+            "stream": False, "options": {"temperature": temperature},
+        }, timeout=60)
+        return r.json().get("response", "").strip()
+    except Exception as e:
+        return f'{{"error": "{e}"}}'
+
+
+def _parse_json(raw: str, keys: list) -> dict | None:
+    m = re.search(r'\{[\s\S]*\}', raw)
+    if not m:
+        return None
+    try:
+        data = json.loads(m.group(0))
+        if all(k in data for k in keys):
+            return data
+    except json.JSONDecodeError:
+        pass
+    result = {}
+    for key in keys:
+        kv = re.search(rf'"{key}"\s*:\s*"([^"]*)"', raw)
+        if kv:
+            result[key] = kv.group(1)
+        kv2 = re.search(rf'"{key}"\s*:\s*([\d.]+)', raw)
+        if kv2:
+            result[key] = float(kv2.group(1))
+    return result if result else None
+
+
+def _extract_relations(raw: str, model: str, sess_id: str) -> list[dict]:
+    pattern = re.compile(
+        r'\{\s*"subject"\s*:\s*"([^"]+)"\s*,\s*"predicate"\s*:\s*"([^"]+)"\s*,'
+        r'\s*"object"\s*:\s*"([^"]+)"\s*,\s*"confidence"\s*:\s*([\d.]+)',
+        re.IGNORECASE,
+    )
+    out = []
+    for m in pattern.finditer(raw):
+        pred = m.group(2).strip().lower()
+        if pred in VALID_PREDICATES:
+            out.append({
+                "subject":    m.group(1).strip().lower()[:80],
+                "predicate":  pred,
+                "object":     m.group(3).strip().lower()[:80],
+                "confidence": max(0.5, min(0.95, float(m.group(4)))),
+                "proposed_by": model,
+                "session_id": sess_id,
+            })
+    return out
+
+
+# ── synth.db helpers ──────────────────────────────────────────────────────────
+
+def ensure_synth_schema(sconn: sqlite3.Connection):
+    sconn.executescript("""
+        CREATE TABLE IF NOT EXISTS synth_relations (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            subject         TEXT NOT NULL,
+            predicate       TEXT NOT NULL,
+            object          TEXT NOT NULL,
+            proposed_by     TEXT,
+            session_id      TEXT,
+            confidence      REAL DEFAULT 0.70,
+            times_proposed  INTEGER DEFAULT 1,
+            consensus_support INTEGER DEFAULT 0,
+            domain          TEXT DEFAULT 'chess',
+            created_at      REAL,
+            review_status   TEXT DEFAULT 'pending',
+            UNIQUE(subject, predicate, object, domain)
+        );
+        CREATE TABLE IF NOT EXISTS replay_sessions (
+            id          TEXT PRIMARY KEY,
+            game_id     TEXT NOT NULL,
+            white       TEXT,
+            black       TEXT,
+            opening     TEXT,
+            ply_count   INTEGER,
+            positions_deliberated INTEGER DEFAULT 0,
+            parliament_agreements INTEGER DEFAULT 0,
+            parliament_disagreements INTEGER DEFAULT 0,
+            engine_alignment REAL,
+            created_at  REAL
+        );
+    """)
+    sconn.commit()
+
+
+def write_synth_relation(sconn: sqlite3.Connection, rel: dict):
+    sconn.execute("""
+        INSERT INTO synth_relations
+            (subject, predicate, object, proposed_by, session_id,
+             confidence, times_proposed, consensus_support, domain, created_at)
+        VALUES (?,?,?,?,?,?,1,?,?,?)
+        ON CONFLICT(subject,predicate,object,domain) DO UPDATE SET
+            times_proposed    = times_proposed + 1,
+            confidence        = MAX(confidence, excluded.confidence),
+            consensus_support = MAX(consensus_support, excluded.consensus_support)
+    """, (rel["subject"], rel["predicate"], rel["object"],
+          rel.get("proposed_by"), rel.get("session_id"),
+          rel.get("confidence", 0.70),
+          rel.get("consensus_support", 0),
+          "chess",
+          time.time()))
+
+
+# ── Parliament deliberation ───────────────────────────────────────────────────
+
+def parliament_position(board: chess.Board, sf_report: dict,
+                        cms_ctx: str, historical_move: str,
+                        sess_id: str, ply: int,
+                        conn: sqlite3.Connection,
+                        sconn: sqlite3.Connection) -> dict:
+    """Run parliament deliberation on a position with Stockfish as anchor."""
+    fen = board.fen()
+    color_name = "white" if board.turn == chess.WHITE else "black"
+    sf_text = sf_report.get("report", "")
+
+    print(f"\n  {SF}{BOLD}Stockfish:{R} {SF}{sf_report['eval_str']}{R}  "
+          f"PV: {' '.join(sf_report['pv'][:4])}")
+    print(f"  {DIM}Historical: {historical_move or '(game end)'}{R}")
+    print(f"  {'─'*56}")
+
+    positions = {}
+    for model in MODELS:
+        col = MODEL_COLORS.get(model, LLM)
+        print(f"  {col}{model:20}{R}", end=" ", flush=True)
+        role = MODEL_ROLES.get(model, "independent reasoner")
+
+        prompt = f"""You are a chess parliament member analyzing a historical game position.
+Your role: {role}
+
+Position (FEN): {fen}
+It is {color_name}'s turn.
+
+{sf_text}
+
+Chess knowledge substrate (CMS):
+{cms_ctx}
+
+Historical game continuation: {historical_move or '(end of game)'}
+
+Deliberate on this position. Reason independently.
+Do you agree with Stockfish's preferred line? Why or why not?
+What strategic themes does this position express?
+Extract any causal insights as proposed relations.
+
+Respond in JSON only:
+{{
+  "conclusion": "your strategic assessment (2-3 sentences)",
+  "proposed_move": "the move you'd recommend in this position",
+  "agrees_with_engine": true or false,
+  "agrees_with_historical": true or false,
+  "reasoning": "your reasoning (2-3 sentences)",
+  "confidence": 0.0-1.0,
+  "key_insight": "one sentence — most important thing about this position",
+  "proposed_relations": [
+    {{"subject": "concept", "predicate": "leads_to", "object": "concept", "confidence": 0.75}}
+  ]
+}}"""
+
+        raw = _llm(model, prompt, temperature=0.5)
+        data = _parse_json(raw, ["conclusion", "confidence"])
+        if not data:
+            data = {"conclusion": raw[:150] or "(no response)",
+                    "proposed_move": "", "agrees_with_engine": None,
+                    "agrees_with_historical": None, "reasoning": "",
+                    "confidence": 0.50, "key_insight": ""}
+            print(f"{WARN}partial{R}", end="")
+        else:
+            conf = float(data.get("confidence", 0.5))
+            eng_agree = data.get("agrees_with_engine")
+            hist_agree = data.get("agrees_with_historical")
+            tag = f"{OK}✓eng{R}" if eng_agree else f"{WARN}✗eng{R}"
+            tag2 = f"{OK}✓hist{R}" if hist_agree else f"{WARN}✗hist{R}"
+            print(f"{OK}ok{R}  conf={conf:.2f}  {tag} {tag2}", end="")
+
+        print(f"  \"{str(data.get('conclusion',''))[:50]}\"")
+        positions[model] = data
+
+        # Write per-model deliberation to chess DB
+        row_id = f"{sess_id}:{ply}:{model}"
+        conn.execute("""
+            INSERT OR IGNORE INTO parliament_move_deliberations
+                (id, session_id, ply, model, fen, conclusion, reasoning,
+                 confidence, key_factors, key_insight, is_consensus,
+                 stockfish_eval, agrees_with_engine, agrees_with_historical,
+                 created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,0,?,?,?,?)
+        """, (row_id, sess_id, ply, model, fen,
+              str(data.get("conclusion", ""))[:500],
+              str(data.get("reasoning", ""))[:1000],
+              float(data.get("confidence", 0.5)),
+              str(data.get("proposed_move", ""))[:50],
+              str(data.get("key_insight", ""))[:300],
+              sf_report.get("eval", 0.0),
+              1 if data.get("agrees_with_engine") else 0,
+              1 if data.get("agrees_with_historical") else 0,
+              time.time()))
+
+        for rel in _extract_relations(raw, model, sess_id):
+            write_synth_relation(sconn, rel)
+
+    sconn.commit()
+    conn.commit()
+
+    # Consensus
+    all_confs = [float(p.get("confidence", 0.5)) for p in positions.values()]
+    avg_conf  = sum(all_confs) / len(all_confs) if all_confs else 0.5
+    lead = max(positions, key=lambda m: float(positions[m].get("confidence", 0)))
+    consensus_text = positions[lead].get("conclusion", "")
+    engine_agreements = sum(1 for p in positions.values()
+                            if p.get("agrees_with_engine") is True)
+    hist_agreements = sum(1 for p in positions.values()
+                          if p.get("agrees_with_historical") is True)
+
+    # Write Stockfish as a special parliament entry
+    sf_row_id = f"{sess_id}:{ply}:stockfish"
+    conn.execute("""
+        INSERT OR IGNORE INTO parliament_move_deliberations
+            (id, session_id, ply, model, fen, conclusion, reasoning,
+             confidence, key_factors, key_insight, is_consensus,
+             stockfish_eval, created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,0,?,?)
+    """, (sf_row_id, sess_id, ply, "stockfish", fen,
+          " ".join(sf_report.get("pv", [])[:4]),
+          sf_report.get("report", "")[:1000],
+          0.99,
+          json.dumps(sf_report.get("candidates", [])),
+          f"Engine eval: {sf_report['eval_str']}",
+          sf_report.get("eval", 0.0),
+          time.time()))
+
+    # Write consensus row
+    cons_id = f"{sess_id}:{ply}:consensus"
+    conn.execute("""
+        INSERT OR IGNORE INTO parliament_move_deliberations
+            (id, session_id, ply, model, fen, conclusion, reasoning,
+             confidence, key_factors, key_insight, is_consensus,
+             stockfish_eval, created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,1,?,?)
+    """, (cons_id, sess_id, ply, lead, fen,
+          consensus_text[:500],
+          f"engine_agree={engine_agreements}/{len(MODELS)} "
+          f"hist_agree={hist_agreements}/{len(MODELS)}",
+          avg_conf,
+          json.dumps(MODELS),
+          f"lead={lead}",
+          sf_report.get("eval", 0.0),
+          time.time()))
+    conn.commit()
+
+    print(f"\n  {BOLD}Consensus:{R} conf={avg_conf:.2f}  "
+          f"engine={engine_agreements}/{len(MODELS)}  "
+          f"historical={hist_agreements}/{len(MODELS)}")
+    print(f"  \"{consensus_text[:80]}\"")
+
+    return {
+        "conclusion":          consensus_text,
+        "confidence":          avg_conf,
+        "engine_agreements":   engine_agreements,
+        "hist_agreements":     hist_agreements,
+        "total":               len(MODELS),
+        "lead":                lead,
+        "positions":           positions,
+    }
+
+
+# ── Game replay ───────────────────────────────────────────────────────────────
+
+def replay_game(game_row: dict, engine: chess.engine.SimpleEngine,
+                conn: sqlite3.Connection, sconn: sqlite3.Connection) -> dict:
+    """Replay a single game with parliament deliberation at key positions."""
+
+    gid   = game_row["id"]
+    white = game_row.get("white", "?")
+    black = game_row.get("black", "?")
+    opening = game_row.get("opening", "")
+    pgn_text = game_row.get("pgn_text", "")
+
+    # Reconstruct move list from chess_moves table or embedded PGN
+    moves_rows = conn.execute("""
+        SELECT ply, san FROM chess_moves WHERE game_id=? ORDER BY ply
+    """, (gid,)).fetchall()
+
+    if not moves_rows:
+        return {"skipped": True, "reason": "no moves stored"}
+
+    sess_id = "replay." + hashlib.md5(f"{gid}{time.time()}".encode()).hexdigest()[:10]
+    cms_ctx = build_cms_context(conn, white, black, opening)
+
+    print(f"\n  {BOLD}{'═'*58}{R}")
+    print(f"  Replaying: {SEL}{white}{R} vs {LLM}{black}{R}  {DIM}{opening}{R}")
+    print(f"  {DIM}{gid}{R}")
+
+    board = chess.Board()
+    prev_eval = 0.0
+    positions_deliberated = 0
+    parliament_agreements = 0
+    parliament_disagreements = 0
+    engine_evals = []
+
+    for ply, (_, san) in enumerate(moves_rows):
+        try:
+            move = board.parse_san(san)
+        except Exception:
+            break
+
+        historical_san = san
+        next_san = moves_rows[ply + 1][1] if ply + 1 < len(moves_rows) else None
+
+        should_deliberate = (
+            not args.no_parliament and
+            (ply % args.deliberate_every == 0 or
+             (len(engine_evals) >= 1 and
+              abs(engine_evals[-1] - prev_eval) >= args.eval_threshold))
+        )
+
+        if should_deliberate:
+            sf = stockfish_report(engine, board, args.stockfish_depth, args.think_time)
+            engine_evals.append(sf["eval"])
+            prev_eval = sf["eval"]
+
+            print(f"\n  {DIM}Ply {ply} | {historical_san}{R}")
+            result = parliament_position(
+                board, sf, cms_ctx, historical_san,
+                sess_id, ply, conn, sconn,
+            )
+            positions_deliberated += 1
+
+            if result["engine_agreements"] >= len(MODELS) // 2:
+                parliament_agreements += 1
+            else:
+                parliament_disagreements += 1
+
+            # Write discovery to claudecode.db
+            body = (f"Replay [{white} vs {black}] ply={ply} "
+                    f"eval={sf['eval_str']} parliament: {result['conclusion'][:120]}")
+            disc_id = hashlib.md5(f"{sess_id}{ply}".encode()).hexdigest()[:12]
+            try:
+                cc = sqlite3.connect(_CLAUDECODE_DB)
+                cc.execute("""
+                    INSERT OR IGNORE INTO discoveries
+                        (id, session_id, body, tags, importance, created_at)
+                    VALUES (?,?,?,?,?,?)
+                """, (disc_id, sess_id, body[:1000], "chess,replay,parliament",
+                      2, time.time()))
+                cc.commit()
+                cc.close()
+            except Exception:
+                pass
+
+        else:
+            # Still track engine eval at every 3rd ply even without deliberation
+            if ply % 3 == 0:
+                info = engine.analyse(board, chess.engine.Limit(depth=10))
+                if info:
+                    sc = info["score"].white()
+                    ev = sc.cp / 100.0 if not sc.is_mate() else (10.0 if sc.mate() > 0 else -10.0)
+                    engine_evals.append(ev)
+                    prev_eval = ev
+
+        if not args.dry_run:
+            board.push(move)
+
+    # Write replay session record
+    avg_align = (parliament_agreements / positions_deliberated
+                 if positions_deliberated else 0.0)
+    sconn.execute("""
+        INSERT OR IGNORE INTO replay_sessions
+            (id, game_id, white, black, opening, ply_count,
+             positions_deliberated, parliament_agreements,
+             parliament_disagreements, engine_alignment, created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+    """, (sess_id, gid, white, black, opening, len(moves_rows),
+          positions_deliberated, parliament_agreements,
+          parliament_disagreements, avg_align, time.time()))
+    sconn.commit()
+
+    print(f"\n  {OK}Done{R}: {positions_deliberated} positions deliberated  "
+          f"engine align={avg_align:.0%}")
+
+    return {
+        "id": sess_id, "game_id": gid,
+        "positions_deliberated": positions_deliberated,
+        "parliament_agreements": parliament_agreements,
+        "parliament_disagreements": parliament_disagreements,
+        "engine_alignment": avg_align,
+    }
+
+
+# ── Load games ────────────────────────────────────────────────────────────────
+
+def load_games_from_db(conn: sqlite3.Connection, limit: int,
+                       game_id: str = None,
+                       resume: bool = False) -> list[dict]:
+    if game_id:
+        row = conn.execute(
+            "SELECT id, white, black, opening, ply_count FROM chess_games WHERE id=?",
+            (game_id,)
+        ).fetchone()
+        return [dict(zip(["id","white","black","opening","ply_count"], row))] if row else []
+
+    already_replayed = set()
+    if resume:
+        rows = conn.execute("""
+            SELECT DISTINCT session_id FROM parliament_move_deliberations
+            WHERE is_consensus=1
+        """).fetchall()
+        # session_id is "replay.xxx" — need to map back to game_id via replay_sessions in synth
+        # Simpler: check games that have deliberations stored
+        gids = conn.execute("""
+            SELECT DISTINCT game_id FROM parliament_move_deliberations
+            WHERE model='consensus'
+        """).fetchall()
+        already_replayed = {r[0] for r in gids}
+
+    rows = conn.execute("""
+        SELECT id, white, black, opening, ply_count
+        FROM chess_games
+        WHERE ply_count > 20
+        ORDER BY RANDOM()
+        LIMIT ?
+    """, (limit + len(already_replayed),)).fetchall()
+
+    games = []
+    for row in rows:
+        d = dict(zip(["id","white","black","opening","ply_count"], row))
+        if d["id"] not in already_replayed:
+            games.append(d)
+        if len(games) >= limit:
+            break
+    return games
+
+
+def load_games_from_pgn(pgn_path: str) -> list[dict]:
+    import io
+    import chess.pgn as cpgn
+    games = []
+    text = Path(pgn_path).read_text(errors="replace")
+    with io.StringIO(text) as f:
+        while True:
+            g = cpgn.read_game(f)
+            if g is None:
+                break
+            tags = dict(g.headers)
+            # Collect moves
+            moves = []
+            node = g
+            ply = 0
+            while node.variations:
+                node = node.variations[0]
+                try:
+                    san = node.parent.board().san(node.move)
+                    moves.append((ply, san))
+                    ply += 1
+                except Exception:
+                    break
+
+            games.append({
+                "id":       "pgn." + hashlib.md5(
+                    f"{tags.get('White')}{tags.get('Black')}{tags.get('Date')}".encode()
+                ).hexdigest()[:12],
+                "white":   tags.get("White", "?"),
+                "black":   tags.get("Black", "?"),
+                "opening": tags.get("Opening", ""),
+                "ply_count": len(moves),
+                "_moves":  moves,
+            })
+    return games
+
+
+# ── Stats ─────────────────────────────────────────────────────────────────────
+
+def cmd_stats(conn: sqlite3.Connection, sconn: sqlite3.Connection):
+    total = conn.execute("SELECT COUNT(*) FROM parliament_move_deliberations").fetchone()[0]
+    consensus = conn.execute(
+        "SELECT COUNT(*) FROM parliament_move_deliberations WHERE is_consensus=1"
+    ).fetchone()[0]
+    eng_agree = conn.execute("""
+        SELECT AVG(CAST(json_extract(key_factors,'$[1]') AS REAL))
+        FROM parliament_move_deliberations WHERE model != 'consensus' AND model != 'stockfish'
+    """).fetchone()[0]
+
+    synth = sconn.execute("SELECT COUNT(*) FROM synth_relations WHERE domain='chess'").fetchone()[0]
+    replayed = sconn.execute("SELECT COUNT(*) FROM replay_sessions").fetchone()[0]
+
+    print(f"\n  Replay Stats")
+    print(f"  {'─'*40}")
+    print(f"  Games replayed:          {replayed:,}")
+    print(f"  Parliament positions:     {total:,}")
+    print(f"  Consensus records:        {consensus:,}")
+    print(f"  Chess synth relations:    {synth:,}")
+
+    top_models = conn.execute("""
+        SELECT model, COUNT(*) c FROM parliament_move_deliberations
+        WHERE model NOT IN ('consensus','stockfish')
+        GROUP BY model ORDER BY c DESC
+    """).fetchall()
+    if top_models:
+        print(f"\n  Model participation:")
+        for m, c in top_models:
+            print(f"    {m:20} {c:,} deliberations")
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+def main():
+    sf_path = find_stockfish()
+    if not sf_path:
+        print(f"{ERR}Stockfish not found. Install: sudo apt install stockfish{R}")
+        sys.exit(1)
+
+    conn  = sqlite3.connect(args.db)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS parliament_move_deliberations (
+            id          TEXT PRIMARY KEY,
+            session_id  TEXT NOT NULL,
+            game_id     TEXT,
+            ply         INTEGER,
+            model       TEXT NOT NULL,
+            fen         TEXT,
+            conclusion  TEXT,
+            reasoning   TEXT,
+            confidence  REAL DEFAULT 0.70,
+            key_factors TEXT,
+            key_insight TEXT,
+            is_consensus INTEGER DEFAULT 0,
+            outcome     TEXT DEFAULT 'pending',
+            stockfish_eval REAL,
+            agrees_with_engine INTEGER DEFAULT 0,
+            agrees_with_historical INTEGER DEFAULT 0,
+            created_at  REAL
+        );
+        CREATE INDEX IF NOT EXISTS idx_pmd_session ON parliament_move_deliberations(session_id);
+        CREATE INDEX IF NOT EXISTS idx_pmd_game    ON parliament_move_deliberations(game_id);
+    """)
+    conn.commit()
+    sconn = sqlite3.connect(args.synth_db)
+    ensure_synth_schema(sconn)
+
+    if args.stats:
+        cmd_stats(conn, sconn)
+        conn.close(); sconn.close()
+        return
+
+    engine = chess.engine.SimpleEngine.popen_uci(sf_path)
+
+    if args.pgn:
+        games = load_games_from_pgn(args.pgn)
+        if args.games:
+            games = games[:args.games]
+        # For PGN games, attach moves directly
+        for g in games:
+            # Patch conn.execute to use _moves from PGN
+            g["_from_pgn"] = True
+    elif args.game_id:
+        games = load_games_from_db(conn, 1, game_id=args.game_id)
+    else:
+        games = load_games_from_db(conn, args.games, resume=args.resume)
+
+    if not games:
+        print(f"{WARN}No games to replay.{R}")
+        engine.quit(); conn.close(); sconn.close()
+        return
+
+    print(f"\n  {BOLD}Selyrion Experiential Replay{R}")
+    print(f"  {DIM}{len(games)} games  |  models: {', '.join(MODELS)}{R}")
+    print(f"  {DIM}parliament every {args.deliberate_every} plies + turning points "
+          f"(threshold ±{args.eval_threshold}){R}")
+    if args.no_parliament:
+        print(f"  {WARN}Parliament disabled — Stockfish eval only{R}")
+
+    processed = errors = 0
+    for i, game in enumerate(games):
+        print(f"\n  [{i+1}/{len(games)}]", end="")
+
+        # For PGN-sourced games, monkey-patch chess_moves query
+        if game.get("_from_pgn"):
+            original_execute = conn.execute
+            pgn_moves = game.get("_moves", [])
+            def _mock_execute(sql, params=()):
+                if "chess_moves" in sql and "game_id" in sql:
+                    class _FakeResult:
+                        def fetchall(self_):
+                            return pgn_moves
+                    return _FakeResult()
+                return original_execute(sql, params)
+            conn.execute = _mock_execute
+
+        try:
+            result = replay_game(game, engine, conn, sconn)
+            if not result.get("skipped"):
+                processed += 1
+        except KeyboardInterrupt:
+            print(f"\n  Interrupted.")
+            break
+        except Exception as e:
+            errors += 1
+            if args.verbose:
+                import traceback; traceback.print_exc()
+            else:
+                print(f"  {ERR}Error: {e}{R}")
+        finally:
+            if game.get("_from_pgn"):
+                conn.execute = original_execute
+
+        if not args.batch and i < len(games) - 1:
+            cmd = input(f"\n  Continue? Enter/q: ").strip().lower()
+            if cmd == "q":
+                break
+
+    engine.quit()
+    print(f"\n  {BOLD}Replay complete.{R}  Processed: {processed}  Errors: {errors}")
+    print(f"  Synth relations pending: ", end="")
+    print(sconn.execute(
+        "SELECT COUNT(*) FROM synth_relations WHERE review_status='pending'"
+    ).fetchone()[0])
+    print(f"  Run: python3 selyrion_parliament.py --review")
+
+    conn.close(); sconn.close()
+
+
+if __name__ == "__main__":
+    main()
