@@ -73,8 +73,9 @@ parser.add_argument("--dry-run",       action="store_true")
 parser.add_argument("--verbose",       action="store_true")
 args = parser.parse_args()
 
-OLLAMA_URL = "http://localhost:11434/api/generate"
-MODELS     = [m.strip() for m in args.models.split(",") if m.strip()]
+OLLAMA_URL    = "http://localhost:11434/api/generate"
+MODELS        = [m.strip() for m in args.models.split(",") if m.strip()]
+SUPERMODEL_DB = str(Path.home() / "supermodel.db")
 
 # ── ANSI ──────────────────────────────────────────────────────────────────────
 R    = "\033[0m";  BOLD = "\033[1m";  DIM = "\033[2m"
@@ -96,6 +97,54 @@ MODEL_ROLES = {
     "phi4-mini":  "analytical discipline — precise reasoning, structured logic",
     "qwen3:4b":   "broad knowledge — history, theory, comparative evidence",
 }
+def load_psychometric_weights() -> dict:
+    """Load per-model engine_agreement rates from supermodel.db for consensus weighting."""
+    weights = {m: 1.0 for m in MODELS}
+    if not Path(SUPERMODEL_DB).exists():
+        return weights
+    try:
+        conn = sqlite3.connect(SUPERMODEL_DB)
+        rows = conn.execute("""
+            SELECT model, total_positions, engine_agreements
+            FROM model_psychometrics WHERE domain='chess'
+        """).fetchall()
+        conn.close()
+        for model, total, eng in rows:
+            if total and total > 10:
+                weights[model] = (eng or 0) / total
+    except Exception:
+        pass
+    return weights
+
+
+def write_contradiction(conn: sqlite3.Connection, sess_id: str, ply: int,
+                        model_a: str, data_a: dict,
+                        model_b: str, data_b: dict):
+    """Log engine-agreement contradiction between two models to supermodel.db."""
+    if not Path(SUPERMODEL_DB).exists():
+        return
+    try:
+        sm = sqlite3.connect(SUPERMODEL_DB)
+        topic = "engine agreement"
+        if data_a.get("proposed_move") and data_b.get("proposed_move"):
+            topic = f"move choice: {data_a['proposed_move']} vs {data_b['proposed_move']}"
+        sm.execute("""
+            INSERT INTO contradiction_ledger
+                (session_id, ply, domain, model_a, claim_a, conf_a,
+                 model_b, claim_b, conf_b, topic, created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?)
+        """, (sess_id, ply, "chess",
+              model_a, str(data_a.get("conclusion", ""))[:300],
+              float(data_a.get("confidence", 0.5)),
+              model_b, str(data_b.get("conclusion", ""))[:300],
+              float(data_b.get("confidence", 0.5)),
+              topic, time.time()))
+        sm.commit()
+        sm.close()
+    except Exception:
+        pass
+
+
 VALID_PREDICATES = {
     "leads_to", "enables", "causes", "weakens", "strengthens", "requires",
     "produces", "results_in", "restricts", "exposes", "threatens", "inhibits",
@@ -438,15 +487,32 @@ Respond in JSON only:
     sconn.commit()
     conn.commit()
 
-    # Consensus
+    # Weighted consensus using psychometric engine-agreement rates
+    psych_weights = load_psychometric_weights()
     all_confs = [float(p.get("confidence", 0.5)) for p in positions.values()]
     avg_conf  = sum(all_confs) / len(all_confs) if all_confs else 0.5
-    lead = max(positions, key=lambda m: float(positions[m].get("confidence", 0)))
+
+    def weighted_score(m):
+        raw = float(positions[m].get("confidence", 0.5))
+        return raw * psych_weights.get(m, 1.0)
+
+    lead = max(positions, key=weighted_score)
     consensus_text = positions[lead].get("conclusion", "")
     engine_agreements = sum(1 for p in positions.values()
                             if p.get("agrees_with_engine") is True)
     hist_agreements = sum(1 for p in positions.values()
                           if p.get("agrees_with_historical") is True)
+
+    # Contradiction detection — log inter-model engine disagreements
+    model_list = list(positions.keys())
+    for i, m_a in enumerate(model_list):
+        for m_b in model_list[i+1:]:
+            agree_a = positions[m_a].get("agrees_with_engine")
+            agree_b = positions[m_b].get("agrees_with_engine")
+            if agree_a is not None and agree_b is not None and agree_a != agree_b:
+                write_contradiction(conn, sess_id, ply,
+                                    m_a, positions[m_a],
+                                    m_b, positions[m_b])
 
     # Write Stockfish as a special parliament entry
     sf_row_id = f"{sess_id}:{ply}:stockfish"
