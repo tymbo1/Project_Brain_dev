@@ -44,6 +44,8 @@ except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "requests", "-q"])
     import requests
 
+from adaptive_policy import AdaptivePolicy, DebatePolicy
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 parser = argparse.ArgumentParser()
@@ -383,14 +385,22 @@ def parliament_position(board: chess.Board, sf_report: dict,
                         cms_ctx: str, historical_move: str,
                         sess_id: str, ply: int,
                         conn: sqlite3.Connection,
-                        sconn: sqlite3.Connection) -> dict:
+                        sconn: sqlite3.Connection,
+                        policy: DebatePolicy = None) -> dict:
     """Run parliament deliberation on a position with Stockfish as anchor."""
+    if policy is None:
+        policy = DebatePolicy()
     fen = board.fen()
     color_name = "white" if board.turn == chess.WHITE else "black"
     sf_text = sf_report.get("report", "")
 
+    zone_tag = f"  {WARN}[{policy.zone_label}]{R}" if policy.zone_label != "normal" else ""
     print(f"\n  {SF}{BOLD}Stockfish:{R} {SF}{sf_report['eval_str']}{R}  "
-          f"PV: {' '.join(sf_report['pv'][:4])}")
+          f"PV: {' '.join(sf_report['pv'][:4])}{zone_tag}")
+    if policy.zone_label != "normal":
+        print(f"  {DIM}Policy: depth={policy.stockfish_depth} "
+              f"threshold={policy.consensus_threshold:.0%} "
+              f"reason: {policy.reason}{R}")
     print(f"  {DIM}Historical: {historical_move or '(game end)'}{R}")
     print(f"  {'─'*56}")
 
@@ -487,16 +497,30 @@ Respond in JSON only:
     sconn.commit()
     conn.commit()
 
-    # Weighted consensus using psychometric engine-agreement rates
-    psych_weights = load_psychometric_weights()
+    # Weighted consensus: policy weights (terrain-derived) × raw confidence
+    # Fall back to psychometric weights if no terrain rules loaded yet
+    terrain_weights = policy.model_weights
+    if not terrain_weights:
+        terrain_weights = load_psychometric_weights()
+
     all_confs = [float(p.get("confidence", 0.5)) for p in positions.values()]
     avg_conf  = sum(all_confs) / len(all_confs) if all_confs else 0.5
 
     def weighted_score(m):
         raw = float(positions[m].get("confidence", 0.5))
-        return raw * psych_weights.get(m, 1.0)
+        return raw * terrain_weights.get(m, 1.0)
 
+    # Apply consensus threshold — require minimum agreement fraction
+    models_agreeing_with_lead = 0
     lead = max(positions, key=weighted_score)
+    lead_eng = positions[lead].get("agrees_with_engine")
+    for m, p in positions.items():
+        if m != lead and p.get("agrees_with_engine") == lead_eng:
+            models_agreeing_with_lead += 1
+    agreement_frac = (models_agreeing_with_lead + 1) / len(positions) if positions else 0
+
+    # If we're in a strict zone and consensus is weak, flag it
+    consensus_weak = agreement_frac < policy.consensus_threshold
     consensus_text = positions[lead].get("conclusion", "")
     engine_agreements = sum(1 for p in positions.values()
                             if p.get("agrees_with_engine") is True)
@@ -533,6 +557,8 @@ Respond in JSON only:
 
     # Write consensus row
     cons_id = f"{sess_id}:{ply}:consensus"
+    weak_flag = " [WEAK_CONSENSUS]" if consensus_weak else ""
+    curr_flag = " [CURRICULUM]" if policy.curriculum_flag else ""
     conn.execute("""
         INSERT OR IGNORE INTO parliament_move_deliberations
             (id, session_id, ply, model, fen, conclusion, reasoning,
@@ -542,10 +568,11 @@ Respond in JSON only:
     """, (cons_id, sess_id, ply, lead, fen,
           consensus_text[:500],
           f"engine_agree={engine_agreements}/{len(MODELS)} "
-          f"hist_agree={hist_agreements}/{len(MODELS)}",
+          f"hist_agree={hist_agreements}/{len(MODELS)}"
+          f" zone={policy.zone_label}{weak_flag}{curr_flag}",
           avg_conf,
           json.dumps(MODELS),
-          f"lead={lead}",
+          f"lead={lead} threshold={policy.consensus_threshold:.0%}",
           sf_report.get("eval", 0.0),
           time.time()))
     conn.commit()
@@ -588,6 +615,7 @@ def replay_game(game_row: dict, engine: chess.engine.SimpleEngine,
 
     sess_id = "replay." + hashlib.md5(f"{gid}{time.time()}".encode()).hexdigest()[:10]
     cms_ctx = build_cms_context(conn, white, black, opening)
+    policy_engine = AdaptivePolicy(SUPERMODEL_DB)
 
     print(f"\n  {BOLD}{'═'*58}{R}")
     print(f"  Replaying: {SEL}{white}{R} vs {LLM}{black}{R}  {DIM}{opening}{R}")
@@ -617,14 +645,21 @@ def replay_game(game_row: dict, engine: chess.engine.SimpleEngine,
         )
 
         if should_deliberate:
-            sf = stockfish_report(engine, board, args.stockfish_depth, args.think_time)
+            # Get adaptive policy for this position (uses last known eval)
+            last_eval = engine_evals[-1] if engine_evals else None
+            dp = policy_engine.for_position(ply, last_eval, opening)
+
+            sf = stockfish_report(engine, board, dp.stockfish_depth, args.think_time)
             engine_evals.append(sf["eval"])
             prev_eval = sf["eval"]
+
+            # Re-evaluate policy now that we have the actual eval
+            dp = policy_engine.for_position(ply, sf["eval"], opening)
 
             print(f"\n  {DIM}Ply {ply} | {historical_san}{R}")
             result = parliament_position(
                 board, sf, cms_ctx, historical_san,
-                sess_id, ply, conn, sconn,
+                sess_id, ply, conn, sconn, dp,
             )
             positions_deliberated += 1
 
