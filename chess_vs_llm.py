@@ -841,6 +841,12 @@ def main():
 
     try:
         while not board.is_game_over():
+            if board.can_claim_threefold_repetition():
+                print(f"\n  {WARN_COL}Draw claimed: threefold repetition{R}")
+                break
+            if board.can_claim_fifty_moves():
+                print(f"\n  {WARN_COL}Draw claimed: fifty-move rule{R}")
+                break
             turn = board.turn
             is_selyrion = (turn == sel_color)
             color_name  = "white" if turn == chess.WHITE else "black"
