@@ -83,24 +83,76 @@ OLLAMA_URL    = "http://localhost:11434/api/generate"
 MODELS        = [m.strip() for m in args.models.split(",") if m.strip()]
 SUPERMODEL_DB = str(Path.home() / "supermodel.db")
 
-# Parliament position recall cache — FEN → cached consensus (built from prior deliberations)
-_POSITION_CACHE: dict = {}
+# ── CMS position memory ───────────────────────────────────────────────────────
+# Parliament consensus is stored as 'position' anchors in the CMS.
+# FEN → anchor. Maturity grows only on re-encounter with conf ≥ 0.80.
+# Maturity ≥ 2.0 (seen 10+ times) = RECALL; skip full deliberation.
+# No unconditional increments — guarded against motif inflation.
 
-def _load_position_cache(conn: sqlite3.Connection, min_conf: float = 0.80, min_count: int = 2):
-    """Load high-confidence consensus positions into memory cache at session start."""
-    global _POSITION_CACHE
-    rows = conn.execute("""
-        SELECT fen, conclusion, confidence, COUNT(*) as seen
-        FROM parliament_move_deliberations
-        WHERE is_consensus=1 AND confidence >= ? AND fen IS NOT NULL
-        GROUP BY fen
-        HAVING seen >= ?
-        ORDER BY confidence DESC
-    """, (min_conf, min_count)).fetchall()
-    _POSITION_CACHE = {r["fen"]: {"conclusion": r["conclusion"],
-                                   "confidence": r["confidence"],
-                                   "seen": r["seen"]} for r in rows}
-    return len(_POSITION_CACHE)
+POSITION_RECALL_THRESHOLD = 2.0   # maturity required to skip deliberation
+POSITION_MATURITY_STEP    = 0.1   # per confirmed re-encounter (conf ≥ 0.80)
+POSITION_MIN_CONF         = 0.80  # minimum consensus confidence to write
+
+def _fen_canonical(fen: str) -> str:
+    """Short stable key for a FEN (strip move clocks, hash)."""
+    parts = fen.split()
+    core = " ".join(parts[:4])  # piece placement, active color, castling, en passant
+    return "pos." + hashlib.md5(core.encode()).hexdigest()[:12]
+
+def cms_position_recall(conn: sqlite3.Connection, fen: str) -> dict | None:
+    """Query CMS for a known position anchor. Returns consensus dict or None."""
+    canon = _fen_canonical(fen)
+    row = conn.execute(
+        "SELECT display_name, sources, maturity FROM anchors WHERE canonical=?",
+        (canon,)
+    ).fetchone()
+    if row and row["maturity"] >= POSITION_RECALL_THRESHOLD:
+        try:
+            data = json.loads(row["sources"] or "{}")
+            return {"conclusion": row["display_name"],
+                    "confidence": data.get("confidence", 0.80),
+                    "seen": int(row["maturity"] / POSITION_MATURITY_STEP),
+                    "maturity": row["maturity"]}
+        except Exception:
+            return None
+    return None
+
+def cms_position_write(conn: sqlite3.Connection, fen: str,
+                       conclusion: str, confidence: float, key_insight: str = ""):
+    """Write or update a position anchor in the CMS. Only for conf ≥ 0.80."""
+    if confidence < POSITION_MIN_CONF:
+        return
+    canon = _fen_canonical(fen)
+    existing = conn.execute(
+        "SELECT maturity FROM anchors WHERE canonical=?", (canon,)
+    ).fetchone()
+    meta = json.dumps({"confidence": confidence, "fen": fen, "insight": key_insight[:200]})
+    if existing:
+        # Re-encounter: small maturity increment, update consensus if better
+        conn.execute("""
+            UPDATE anchors SET maturity = maturity + ?,
+                display_name = CASE WHEN ? > maturity THEN ? ELSE display_name END,
+                sources = ?
+            WHERE canonical = ?
+        """, (POSITION_MATURITY_STEP, confidence, conclusion[:300], meta, canon))
+    else:
+        anchor_id = "anc." + hashlib.md5(canon.encode()).hexdigest()[:10]
+        conn.execute("""
+            INSERT OR IGNORE INTO anchors
+                (id, canonical, display_name, anchor_type, maturity,
+                 sources, domain_tags, visible, state)
+            VALUES (?,?,?,?,?,?,?,1,'active')
+        """, (anchor_id, canon, conclusion[:300], "position",
+              POSITION_MATURITY_STEP, meta, "chess,position"))
+    conn.commit()
+
+def _load_position_cache(conn: sqlite3.Connection, *_):
+    """Count known position anchors for display — CMS is the real store."""
+    count = conn.execute(
+        "SELECT COUNT(*) FROM anchors WHERE anchor_type='position' "
+        "AND domain_tags LIKE '%chess%'"
+    ).fetchone()[0]
+    return count
 
 # ── ANSI ──────────────────────────────────────────────────────────────────────
 R    = "\033[0m";  BOLD = "\033[1m";  DIM = "\033[2m"
@@ -506,8 +558,8 @@ def parliament_position(board: chess.Board, sf_report: dict,
         policy = DebatePolicy()
     fen = board.fen()
 
-    # Position recall — skip deliberation for well-mapped positions
-    cached = _POSITION_CACHE.get(fen)
+    # Position recall — CMS anchor lookup; skip deliberation for mature positions
+    cached = cms_position_recall(conn, fen)
     if cached and not policy.curriculum_flag and not args.claude_review:
         print(f"\n  {SF}{BOLD}Stockfish:{R} {SF}{sf_report['eval_str']}{R}  "
               f"PV: {' '.join(sf_report['pv'][:4])}")
@@ -716,6 +768,12 @@ Respond in JSON only:
         "lead":                lead,
         "positions":           positions,
     }
+
+    # Write position memory to CMS (conf-gated, maturity-bounded — no inflation)
+    best_insight = max(positions.values(),
+                       key=lambda p: float(p.get("confidence", 0)),
+                       default={}).get("key_insight", "")
+    cms_position_write(conn, fen, consensus_text, avg_conf, best_insight)
 
     # Claude post-consensus review — runs on curriculum/weak_consensus or --claude-review flag
     if args.claude_review or policy.curriculum_flag or consensus_weak:
