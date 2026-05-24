@@ -168,10 +168,41 @@ def _load_position_cache(conn: sqlite3.Connection, *_):
     ).fetchone()[0]
     return count
 
-# ── Session conclusion history (repetition tracking) ──────────────────────────
-# Keyed by sess_id → deque of last N conclusion strings.
-# Used to inject diversity pressure and penalize repetition in scoring.
+# ── Session conclusion history + temperature management ───────────────────────
 from collections import deque
+
+# Per-model base temperatures — anchor stays cool, divergers run warmer
+_MODEL_BASE_TEMPS: dict[str, float] = {
+    "qwen2.5:14b": 0.50,
+    "gemma3:4b":   0.70,
+    "phi4-mini":   0.75,
+}
+_TEMP_HEAT_BUMP = 0.25   # added when repeat penalty fires
+_TEMP_MAX       = 1.0
+_TEMP_DECAY     = 0.15   # per-deliberation decay back toward base
+
+_session_model_temps: dict[str, dict[str, float]] = {}
+
+def _get_model_temp(sess_id: str, model: str) -> float:
+    base = _MODEL_BASE_TEMPS.get(model, 0.60)
+    return _session_model_temps.get(sess_id, {}).get(model, base)
+
+def _heat_model(sess_id: str, model: str):
+    base = _MODEL_BASE_TEMPS.get(model, 0.60)
+    bucket = _session_model_temps.setdefault(sess_id, {})
+    bucket[model] = min(_TEMP_MAX, bucket.get(model, base) + _TEMP_HEAT_BUMP)
+
+def _decay_temps(sess_id: str):
+    bucket = _session_model_temps.get(sess_id, {})
+    for model in list(bucket):
+        base    = _MODEL_BASE_TEMPS.get(model, 0.60)
+        cooled  = bucket[model] - _TEMP_DECAY
+        if cooled <= base:
+            del bucket[model]
+        else:
+            bucket[model] = cooled
+
+# Repetition tracking — keyed by sess_id → deque of last N conclusions
 _session_conclusions: dict[str, deque] = {}
 _CONCLUSION_HISTORY  = 3   # how many recent conclusions to show models
 _REPETITION_PENALTY  = 0.65  # multiplier applied to a model's score when it echoes recent consensus
@@ -684,7 +715,11 @@ Respond in JSON only:
   "tool_calls": []
 }}"""
 
-        raw = _llm(model, prompt, temperature=0.5)
+        temp = _get_model_temp(sess_id, model)
+        base_temp = _MODEL_BASE_TEMPS.get(model, 0.60)
+        if temp > base_temp + 0.01:
+            print(f"{WARN}[HEATED:{temp:.2f}]{R} ", end="")
+        raw = _llm(model, prompt, temperature=temp)
         data = _parse_json(raw, ["conclusion", "confidence"])
         if not data:
             data = {"conclusion": raw[:150] or "(no response)",
@@ -778,7 +813,8 @@ Respond in JSON only:
         repeat = _repetition_score(str(positions[m].get("conclusion", "")), recent)
         score  = raw * terrain_weights.get(m, 1.0) * repeat
         if repeat < 1.0:
-            print(f"  {WARN}[REPEAT PENALTY]{R} {m}: score ×{repeat:.2f}")
+            print(f"  {WARN}[REPEAT PENALTY]{R} {m}: score ×{repeat:.2f} → heating next round")
+            _heat_model(sess_id, m)
         return score
 
     # Apply consensus threshold — require minimum agreement fraction
@@ -878,6 +914,7 @@ Respond in JSON only:
     if trace:
         trace.finish(f"consensus:{consensus_text[:80]} conf={avg_conf:.2f}")
 
+    _decay_temps(sess_id)
     return result
 
 

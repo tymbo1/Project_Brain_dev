@@ -260,8 +260,40 @@ def detect_motifs(text: str) -> list[str]:
     return out
 
 
-# ── Parliament session conclusion history (repetition tracking) ───────────────
+# ── Parliament session conclusion history + temperature management ─────────────
 from collections import deque as _deque
+
+_PARL_MODEL_BASE_TEMPS: dict[str, float] = {
+    "qwen2.5:14b": 0.50,
+    "gemma3:4b":   0.70,
+    "phi4-mini":   0.75,
+    "qwen3:4b":    0.70,
+}
+_PARL_TEMP_HEAT_BUMP = 0.25
+_PARL_TEMP_MAX       = 1.0
+_PARL_TEMP_DECAY     = 0.15
+
+_parl_session_model_temps: dict[str, dict[str, float]] = {}
+
+def _parl_get_model_temp(sess_id: str, model: str) -> float:
+    base = _PARL_MODEL_BASE_TEMPS.get(model, 0.60)
+    return _parl_session_model_temps.get(sess_id, {}).get(model, base)
+
+def _parl_heat_model(sess_id: str, model: str):
+    base   = _PARL_MODEL_BASE_TEMPS.get(model, 0.60)
+    bucket = _parl_session_model_temps.setdefault(sess_id, {})
+    bucket[model] = min(_PARL_TEMP_MAX, bucket.get(model, base) + _PARL_TEMP_HEAT_BUMP)
+
+def _parl_decay_temps(sess_id: str):
+    bucket = _parl_session_model_temps.get(sess_id, {})
+    for model in list(bucket):
+        base   = _PARL_MODEL_BASE_TEMPS.get(model, 0.60)
+        cooled = bucket[model] - _PARL_TEMP_DECAY
+        if cooled <= base:
+            del bucket[model]
+        else:
+            bucket[model] = cooled
+
 _parl_session_conclusions: dict[str, _deque] = {}
 _PARL_CONCLUSION_HISTORY = 3
 _PARL_REPETITION_PENALTY = 0.65
@@ -484,10 +516,14 @@ def parliament_consult(board: "chess.Board", cms_ctx: str,
         col = _PARL_MODEL_COLORS.get(model, CMS_COL)
         print(f"  {col}{model:20}{R}", end=" ", flush=True)
         prompt = _parl_first_pass_prompt(model, fen, color_name, cms_ctx, recent)
+        temp      = _parl_get_model_temp(sess_id, model)
+        base_temp = _PARL_MODEL_BASE_TEMPS.get(model, 0.60)
+        if temp > base_temp + 0.01:
+            print(f"\033[33m[HEATED:{temp:.2f}]\033[0m ", end="")
         try:
             resp = requests.post(OLLAMA_URL, json={
                 "model": model, "prompt": prompt,
-                "stream": False, "options": {"temperature": 0.5},
+                "stream": False, "options": {"temperature": temp},
             }, timeout=45)
             raw = resp.json().get("response", "").strip()
         except Exception as e:
@@ -537,12 +573,14 @@ def parliament_consult(board: "chess.Board", cms_ctx: str,
         raw    = float(positions[m].get("confidence", 0.5))
         repeat = _parl_repetition_score(str(positions[m].get("conclusion", "")), recent)
         if repeat < 1.0:
-            print(f"  \033[33m[REPEAT PENALTY]\033[0m {m}: score ×{repeat:.2f}")
+            print(f"  \033[33m[REPEAT PENALTY]\033[0m {m}: score ×{repeat:.2f} → heating next round")
+            _parl_heat_model(sess_id, m)
         return raw * repeat
 
     lead_model     = max(positions, key=_parl_weighted)
     consensus_text = positions[lead_model].get("conclusion", "")
     _parl_record_conclusion(sess_id, consensus_text)
+    _parl_decay_temps(sess_id)
 
     # Collect key insights
     insights = [
