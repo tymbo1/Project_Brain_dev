@@ -544,7 +544,10 @@ def parliament_consult(board: "chess.Board", cms_ctx: str,
         positions[model] = data
 
         for rel in _parl_extract_relations(raw, model, sess_id):
-            _parl_write_relation(synth_conn, rel)
+            try:
+                _parl_write_relation(synth_conn, rel)
+            except Exception:
+                pass  # synth writes are best-effort; don't crash the game
 
         # Write per-model reasoning to chess DB for post-game adjudication
         row_id = f"{sess_id}:{ply}:{model}"
@@ -768,12 +771,15 @@ def main():
     flip_board = (sel_color == chess.BLACK)
     human_mode = args.take
 
-    conn = sqlite3.connect(args.db)
+    conn = sqlite3.connect(args.db, timeout=30)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
     ensure_schema(conn)
 
     synth_conn = None
     if args.parliament:
-        synth_conn = sqlite3.connect(args.synth_db)
+        synth_conn = sqlite3.connect(args.synth_db, timeout=30)
+        synth_conn.execute("PRAGMA journal_mode=WAL")
         _parl_ensure_schema(synth_conn)
 
     engine = chess.engine.SimpleEngine.popen_uci(stockfish_path)
@@ -909,15 +915,21 @@ def main():
                     narration = narrate_selyrion(board_before, move, cms_ctx,
                                                   parl_consensus)
                     node.comment = narration
-                    motifs = write_move(conn, sess_id, ply, move, san, board,
-                                        color_name, narration)
+                    try:
+                        motifs = write_move(conn, sess_id, ply, move, san, board,
+                                            color_name, narration)
+                    except sqlite3.OperationalError:
+                        motifs = []
                     print(f"  {SEL_COL}{BOLD}Selyrion: {san}{R}")
                     print(f"  {SEL_COL}  \"{narration}\"{R}")
                     if motifs:
                         print(f"  {CMS_COL}  [CMS: {', '.join(motifs)}]{R}")
                 else:
-                    motifs = write_move(conn, sess_id, ply, move, san, board,
-                                        color_name, f"Human played {san}")
+                    try:
+                        motifs = write_move(conn, sess_id, ply, move, san, board,
+                                            color_name, f"Human played {san}")
+                    except sqlite3.OperationalError:
+                        motifs = []
 
                 print_board(board, last_move=move, flip=flip_board)
 
@@ -939,8 +951,11 @@ def main():
 
                 narration = narrate_opponent(board_before, move)
                 node.comment = narration
-                motifs = write_move(conn, sess_id, ply, move, san, board,
-                                    color_name, narration)
+                try:
+                    motifs = write_move(conn, sess_id, ply, move, san, board,
+                                        color_name, narration)
+                except sqlite3.OperationalError:
+                    motifs = []
 
                 print(f"  {OPP_COL}{BOLD}Stockfish: {san}{R}")
                 print(f"  {OPP_COL}  \"{narration}\"{R}")
