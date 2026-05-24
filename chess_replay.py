@@ -46,6 +46,20 @@ except ImportError:
 
 from adaptive_policy import AdaptivePolicy, DebatePolicy
 
+try:
+    from scos_tools import registry, new_trace
+    SCOS_AVAILABLE = True
+except Exception:
+    SCOS_AVAILABLE = False
+
+TOOL_MANIFEST = (
+    "\nAvailable tools (optional — omit tool_calls if not needed):\n"
+    "  memory.search     {\"query\": \"concept\"}              — recall CMS knowledge\n"
+    "  graph.query       {\"concept\": \"name\", \"depth\": 1}  — traverse concept graph\n"
+    "  retrieve.semantic {\"query\": \"position pattern\"}     — semantic CMS retrieval\n"
+    "To invoke: add \"tool_calls\": [{\"tool\": \"memory.search\", \"inputs\": {\"query\": \"...\"}}]\n"
+)
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 parser = argparse.ArgumentParser()
@@ -557,6 +571,7 @@ def parliament_position(board: chess.Board, sf_report: dict,
     if policy is None:
         policy = DebatePolicy()
     fen = board.fen()
+    trace = new_trace(sess_id, f"parliament:ply={ply}") if SCOS_AVAILABLE else None
 
     # Position recall — CMS anchor lookup; skip deliberation for mature positions
     cached = cms_position_recall(conn, fen)
@@ -597,6 +612,7 @@ to a worse square"). Generic phrases like "complex strategic landscape" are forb
 Engine says: {" ".join(sf_report.get("pv", [])[:2])}. Historical was: {historical_move}.
 Pick one. Justify it in chess terms."""
 
+        tool_block = TOOL_MANIFEST if SCOS_AVAILABLE else ""
         prompt = f"""You are a chess parliament member analyzing a historical game position.
 Your role: {role}
 {llama_instruction}
@@ -614,7 +630,7 @@ Deliberate on this position. Reason independently.
 Do you agree with Stockfish's preferred line? Why or why not?
 What strategic themes does this position express?
 Extract any causal insights as proposed relations.
-
+{tool_block}
 Respond in JSON only:
 {{
   "conclusion": "NAME your recommended move first, then give ONE concrete chess reason (e.g. 'I recommend Kf5 because it centralises the king and controls the e4 square'). No generic phrases.",
@@ -626,7 +642,8 @@ Respond in JSON only:
   "key_insight": "one sentence — most important thing about this position",
   "proposed_relations": [
     {{"subject": "concept", "predicate": "leads_to", "object": "concept", "confidence": 0.75}}
-  ]
+  ],
+  "tool_calls": []
 }}"""
 
         raw = _llm(model, prompt, temperature=0.5)
@@ -673,6 +690,39 @@ Respond in JSON only:
 
     sconn.commit()
     conn.commit()
+
+    # ── Tool execution phase ───────────────────────────────────────────────────
+    # Models requested tools during deliberation — execute them now, deduplicated.
+    # Results feed into consensus row reasoning (evidence for future recall).
+    tool_evidence = ""
+    if SCOS_AVAILABLE and trace:
+        queued = []
+        seen_keys = set()
+        for model, data in positions.items():
+            for tc in (data.get("tool_calls") or []):
+                if not isinstance(tc, dict):
+                    continue
+                k = f"{tc.get('tool')}:{json.dumps(tc.get('inputs', {}), sort_keys=True)}"
+                if k not in seen_keys:
+                    seen_keys.add(k)
+                    queued.append((model, tc))
+
+        if queued:
+            print(f"\n  {DIM}Tool calls requested: {len(queued)}{R}")
+            parts = []
+            for src_model, tc in queued:
+                tool_id = tc.get("tool", "")
+                inputs  = tc.get("inputs", {})
+                t0 = time.time()
+                res = registry.execute(tool_id, inputs, trace, confidence=0.5)
+                ms = int((time.time() - t0) * 1000)
+                if res["ok"]:
+                    snippet = str(res["result"])[:120]
+                    parts.append(f"[{tool_id}] {snippet}")
+                    print(f"  {OK}[TOOL]{R} {tool_id} ({src_model}) {ms}ms → {snippet[:80]}")
+                else:
+                    print(f"  {WARN}[TOOL FAIL]{R} {tool_id}: {res.get('error','?')[:60]}")
+            tool_evidence = " | ".join(parts)
 
     # Weighted consensus: policy weights (terrain-derived) × raw confidence
     # Fall back to psychometric weights if no terrain rules loaded yet
@@ -736,6 +786,7 @@ Respond in JSON only:
     cons_id = f"{sess_id}:{ply}:consensus"
     weak_flag = " [WEAK_CONSENSUS]" if consensus_weak else ""
     curr_flag = " [CURRICULUM]" if policy.curriculum_flag else ""
+    tool_suffix = f" [TOOLS:{tool_evidence[:200]}]" if tool_evidence else ""
     conn.execute("""
         INSERT OR IGNORE INTO parliament_move_deliberations
             (id, session_id, ply, model, fen, conclusion, reasoning,
@@ -744,9 +795,9 @@ Respond in JSON only:
         VALUES (?,?,?,?,?,?,?,?,?,?,1,?,?)
     """, (cons_id, sess_id, ply, lead, fen,
           consensus_text[:500],
-          f"engine_agree={engine_agreements}/{len(MODELS)} "
-          f"hist_agree={hist_agreements}/{len(MODELS)}"
-          f" zone={policy.zone_label}{weak_flag}{curr_flag}",
+          (f"engine_agree={engine_agreements}/{len(MODELS)} "
+           f"hist_agree={hist_agreements}/{len(MODELS)}"
+           f" zone={policy.zone_label}{weak_flag}{curr_flag}{tool_suffix}"),
           avg_conf,
           json.dumps(MODELS),
           f"lead={lead} threshold={policy.consensus_threshold:.0%}",
@@ -778,6 +829,9 @@ Respond in JSON only:
     # Claude post-consensus review — runs on curriculum/weak_consensus or --claude-review flag
     if args.claude_review or policy.curriculum_flag or consensus_weak:
         claude_adjudicate(sess_id, ply, fen, sf_report, positions, result, conn)
+
+    if trace:
+        trace.finish(f"consensus:{consensus_text[:80]} conf={avg_conf:.2f}")
 
     return result
 
@@ -1039,6 +1093,7 @@ def main():
         sys.exit(1)
 
     conn  = sqlite3.connect(args.db)
+    conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS parliament_move_deliberations (
@@ -1083,6 +1138,7 @@ def main():
     """)
     conn.commit()
     sconn = sqlite3.connect(args.synth_db)
+    sconn.row_factory = sqlite3.Row
     ensure_synth_schema(sconn)
 
     if args.stats:
