@@ -24,7 +24,7 @@ Usage:
   python3 chess_replay.py --resume                       # resume interrupted batch
 """
 
-import sys, re, json, sqlite3, hashlib, time, argparse, shutil
+import sys, re, json, sqlite3, hashlib, time, argparse, shutil, subprocess
 from pathlib import Path
 from collections import defaultdict
 from datetime import datetime
@@ -58,8 +58,8 @@ parser.add_argument("--synth-db",      default=str(Path.home() / "selyrion_synth
 parser.add_argument("--batch",         action="store_true", help="No pausing between games")
 parser.add_argument("--resume",        action="store_true",
                     help="Skip games already replayed (has parliament_move_deliberations)")
-parser.add_argument("--models",        default="llama3.1:8b,gemma3:4b,phi4-mini",
-                    help="LLM parliament models (qwen3 excluded by default — slow)")
+parser.add_argument("--models",        default="qwen2.5:14b,llama3.1:8b,gemma3:4b,phi4-mini",
+                    help="LLM parliament models")
 parser.add_argument("--stockfish-depth", type=int, default=15,
                     help="Stockfish search depth for parliamentary analysis")
 parser.add_argument("--think-time",    type=float, default=0.3,
@@ -73,6 +73,8 @@ parser.add_argument("--no-parliament", action="store_true",
 parser.add_argument("--stats",         action="store_true")
 parser.add_argument("--dry-run",       action="store_true")
 parser.add_argument("--verbose",       action="store_true")
+parser.add_argument("--claude-review", action="store_true",
+                    help="Call Claude after consensus to adjudicate reasoning quality")
 args = parser.parse_args()
 
 OLLAMA_URL    = "http://localhost:11434/api/generate"
@@ -86,17 +88,19 @@ CMS  = "\033[35m"; LLM  = "\033[36m"; SEL = "\033[38;5;141m"
 SF   = "\033[38;5;214m"  # Stockfish orange
 
 MODEL_COLORS = {
-    "llama3.1:8b": "\033[36m",
-    "llama3:8b":  "\033[36m",
-    "gemma3:4b":  "\033[38;5;141m",
-    "phi4-mini":  "\033[33m",
-    "qwen3:4b":   "\033[38;5;214m",
+    "llama3.1:8b":  "\033[36m",
+    "llama3:8b":    "\033[36m",
+    "gemma3:4b":    "\033[38;5;141m",
+    "phi4-mini":    "\033[33m",
+    "qwen3:4b":     "\033[38;5;214m",
+    "qwen2.5:14b":  "\033[38;5;208m",
 }
 MODEL_ROLES = {
-    "llama3.1:8b": "synthesis arbitrator — compare the engine line vs historical move, name EXACTLY which you prefer and WHY in concrete chess terms (piece activity, pawn structure, king safety). No vague language.",
-    "llama3:8b":  "synthesis arbitrator — compare the engine line vs historical move, name EXACTLY which you prefer and WHY in concrete chess terms (piece activity, pawn structure, king safety). No vague language.",
-    "gemma3:4b":  "symbolic resonance — attend to meaning, metaphor, conceptual depth",
-    "phi4-mini":  "analytical discipline — precise reasoning, structured logic",
+    "qwen2.5:14b":  "lead analyst — give the definitive assessment. Name the best move, explain WHY in concrete chess terms (material, king safety, pawn structure, piece activity). Be authoritative and specific.",
+    "llama3.1:8b":  "synthesis arbitrator — compare the engine line vs historical move, name EXACTLY which you prefer and WHY in concrete chess terms. No vague language.",
+    "llama3:8b":    "synthesis arbitrator — compare the engine line vs historical move, name EXACTLY which you prefer and WHY in concrete chess terms. No vague language.",
+    "gemma3:4b":    "symbolic resonance — attend to meaning, metaphor, conceptual depth",
+    "phi4-mini":    "analytical discipline — precise reasoning, structured logic",
     "qwen3:4b":   "broad knowledge — history, theory, comparative evidence",
 }
 def load_psychometric_weights() -> dict:
@@ -381,6 +385,95 @@ def write_synth_relation(sconn: sqlite3.Connection, rel: dict):
 
 # ── Parliament deliberation ───────────────────────────────────────────────────
 
+def claude_adjudicate(sess_id: str, ply: int, fen: str,
+                      sf_report: dict, positions: dict,
+                      consensus: dict, conn: sqlite3.Connection) -> dict | None:
+    """
+    Call Claude CLI to adjudicate reasoning quality after parliament consensus.
+    Returns structured quality assessment and stores in parliament_claude_reviews.
+    Auto-triggered on curriculum_flag / weak_consensus positions.
+    """
+    sf_eval = sf_report.get("eval_str", "?")
+    sf_pv   = " ".join(sf_report.get("pv", [])[:4])
+
+    model_summaries = []
+    for m, p in positions.items():
+        model_summaries.append(
+            f"  [{m}] move={p.get('proposed_move','?')} conf={p.get('confidence',0):.2f} "
+            f"engine={'agree' if p.get('agrees_with_engine') else 'disagree'}\n"
+            f"    reasoning: {str(p.get('reasoning',''))[:200]}"
+        )
+
+    prompt = f"""You are a senior chess analyst reviewing a parliament of LLMs that analyzed a chess position.
+
+Position (FEN): {fen}
+Stockfish evaluation: {sf_eval}  Best line: {sf_pv}
+Parliament consensus move: {consensus.get('conclusion','?')[:100]}
+Consensus confidence: {consensus.get('confidence',0):.2f}
+Engine agreement: {consensus.get('engine_agreements',0)}/{consensus.get('total',0)} models
+
+Individual model assessments:
+{chr(10).join(model_summaries)}
+
+Your task: Adjudicate the QUALITY OF REASONING, not just correctness.
+Evaluate each model's argument on chess merit: specificity, tactical accuracy, strategic insight.
+Flag hallucinations (confident wrong claims), vague generalities, or genuinely insightful observations.
+
+Respond in JSON only:
+{{
+  "verdict": "good|poor|mixed",
+  "quality_score": 0.0-1.0,
+  "model_scores": {{{", ".join(f'"{m}": 0.0' for m in positions)}}},
+  "good_reasoning": "what was best about the parliament's reasoning (1-2 sentences)",
+  "bad_reasoning": "what was flawed or vague (1-2 sentences)",
+  "key_insight": "the single most valuable chess observation made, or null if none",
+  "training_value": "high|medium|low"
+}}"""
+
+    try:
+        result = subprocess.run(
+            ["claude", "-p", prompt],
+            capture_output=True, text=True, timeout=60
+        )
+        raw = result.stdout.strip()
+        # Extract JSON from response
+        m = re.search(r'\{.*\}', raw, re.DOTALL)
+        if not m:
+            return None
+        data = json.loads(m.group())
+    except Exception:
+        return None
+
+    review_id = f"{sess_id}:{ply}:claude"
+    conn.execute("""
+        INSERT OR REPLACE INTO parliament_claude_reviews
+            (id, session_id, ply, fen, consensus_move, stockfish_eval,
+             verdict, quality_score, model_scores, good_reasoning,
+             bad_reasoning, key_insight, training_value, created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    """, (review_id, sess_id, ply, fen,
+          consensus.get("conclusion","")[:300],
+          sf_report.get("eval", 0.0),
+          data.get("verdict","mixed"),
+          float(data.get("quality_score", 0.5)),
+          json.dumps(data.get("model_scores", {})),
+          str(data.get("good_reasoning",""))[:500],
+          str(data.get("bad_reasoning",""))[:500],
+          str(data.get("key_insight",""))[:300],
+          data.get("training_value","medium"),
+          time.time()))
+    conn.commit()
+
+    vc = OK if data.get("verdict") == "good" else (ERR if data.get("verdict") == "poor" else WARN)
+    print(f"\n  {BOLD}Claude review:{R} {vc}{data.get('verdict','?')}{R} "
+          f"quality={data.get('quality_score',0):.2f} "
+          f"training={data.get('training_value','?')}")
+    if data.get("key_insight"):
+        print(f"  {DIM}Insight: {data['key_insight'][:100]}{R}")
+
+    return data
+
+
 def parliament_position(board: chess.Board, sf_report: dict,
                         cms_ctx: str, historical_move: str,
                         sess_id: str, ply: int,
@@ -582,7 +675,7 @@ Respond in JSON only:
           f"historical={hist_agreements}/{len(MODELS)}")
     print(f"  \"{consensus_text[:80]}\"")
 
-    return {
+    result = {
         "conclusion":          consensus_text,
         "confidence":          avg_conf,
         "engine_agreements":   engine_agreements,
@@ -591,6 +684,12 @@ Respond in JSON only:
         "lead":                lead,
         "positions":           positions,
     }
+
+    # Claude post-consensus review — runs on curriculum/weak_consensus or --claude-review flag
+    if args.claude_review or policy.curriculum_flag or consensus_weak:
+        claude_adjudicate(sess_id, ply, fen, sf_report, positions, result, conn)
+
+    return result
 
 
 # ── Game replay ───────────────────────────────────────────────────────────────
@@ -870,6 +969,24 @@ def main():
         );
         CREATE INDEX IF NOT EXISTS idx_pmd_session ON parliament_move_deliberations(session_id);
         CREATE INDEX IF NOT EXISTS idx_pmd_game    ON parliament_move_deliberations(game_id);
+
+        CREATE TABLE IF NOT EXISTS parliament_claude_reviews (
+            id             TEXT PRIMARY KEY,
+            session_id     TEXT NOT NULL,
+            ply            INTEGER,
+            fen            TEXT,
+            consensus_move TEXT,
+            stockfish_eval REAL,
+            verdict        TEXT,
+            quality_score  REAL,
+            model_scores   TEXT,
+            good_reasoning TEXT,
+            bad_reasoning  TEXT,
+            key_insight    TEXT,
+            training_value TEXT,
+            created_at     REAL
+        );
+        CREATE INDEX IF NOT EXISTS idx_pcr_session ON parliament_claude_reviews(session_id);
     """)
     conn.commit()
     sconn = sqlite3.connect(args.synth_db)
