@@ -182,3 +182,6 @@ User/Input
    chaos cannot feed psychometrics or curriculum.
 5. **Lineage is sacred** — never delete contradiction history, debate records, or reasoning
    provenance. The system learns from failure.
+6. **LLMs propose. Tools execute.** LLMs reason about what to do. Verified tools do it.
+   Never let an LLM directly mutate state, calculate legality, or write to databases.
+   This separation makes the system auditable, stable, and replayable.
