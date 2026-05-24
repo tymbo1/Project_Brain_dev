@@ -75,11 +75,32 @@ parser.add_argument("--dry-run",       action="store_true")
 parser.add_argument("--verbose",       action="store_true")
 parser.add_argument("--claude-review", action="store_true",
                     help="Call Claude after consensus to adjudicate reasoning quality")
+parser.add_argument("--think-budget",  type=float, default=45.0,
+                    help="Max seconds per model deliberation before timeout (default 45)")
 args = parser.parse_args()
 
 OLLAMA_URL    = "http://localhost:11434/api/generate"
 MODELS        = [m.strip() for m in args.models.split(",") if m.strip()]
 SUPERMODEL_DB = str(Path.home() / "supermodel.db")
+
+# Parliament position recall cache — FEN → cached consensus (built from prior deliberations)
+_POSITION_CACHE: dict = {}
+
+def _load_position_cache(conn: sqlite3.Connection, min_conf: float = 0.80, min_count: int = 2):
+    """Load high-confidence consensus positions into memory cache at session start."""
+    global _POSITION_CACHE
+    rows = conn.execute("""
+        SELECT fen, conclusion, confidence, COUNT(*) as seen
+        FROM parliament_move_deliberations
+        WHERE is_consensus=1 AND confidence >= ? AND fen IS NOT NULL
+        GROUP BY fen
+        HAVING seen >= ?
+        ORDER BY confidence DESC
+    """, (min_conf, min_count)).fetchall()
+    _POSITION_CACHE = {r["fen"]: {"conclusion": r["conclusion"],
+                                   "confidence": r["confidence"],
+                                   "seen": r["seen"]} for r in rows}
+    return len(_POSITION_CACHE)
 
 # ── ANSI ──────────────────────────────────────────────────────────────────────
 R    = "\033[0m";  BOLD = "\033[1m";  DIM = "\033[2m"
@@ -281,7 +302,7 @@ def _llm(model: str, prompt: str, temperature: float = 0.5) -> str:
         r = requests.post(OLLAMA_URL, json={
             "model": model, "prompt": prompt,
             "stream": False, "options": {"temperature": temperature},
-        }, timeout=60)
+        }, timeout=args.think_budget + 5)
         return r.json().get("response", "").strip()
     except Exception as e:
         return f'{{"error": "{e}"}}'
@@ -484,6 +505,18 @@ def parliament_position(board: chess.Board, sf_report: dict,
     if policy is None:
         policy = DebatePolicy()
     fen = board.fen()
+
+    # Position recall — skip deliberation for well-mapped positions
+    cached = _POSITION_CACHE.get(fen)
+    if cached and not policy.curriculum_flag and not args.claude_review:
+        print(f"\n  {SF}{BOLD}Stockfish:{R} {SF}{sf_report['eval_str']}{R}  "
+              f"PV: {' '.join(sf_report['pv'][:4])}")
+        print(f"  {DIM}Historical: {historical_move or '(game end)'}{R}")
+        print(f"  {OK}[RECALL]{R} seen={cached['seen']}x  conf={cached['confidence']:.2f}  "
+              f"\"{cached['conclusion'][:70]}\"")
+        return {"conclusion": cached["conclusion"], "confidence": cached["confidence"],
+                "engine_agreements": 0, "hist_agreements": 0,
+                "total": len(MODELS), "lead": "recall", "positions": {}, "recalled": True}
     color_name = "white" if board.turn == chess.WHITE else "black"
     sf_text = sf_report.get("report", "")
 
@@ -504,12 +537,11 @@ def parliament_position(board: chess.Board, sf_report: dict,
         role = MODEL_ROLES.get(model, "independent reasoner")
 
         llama_instruction = ""
-        if model == "llama3:8b":
+        if model in ("llama3:8b", "llama3.1:8b"):
             llama_instruction = f"""
-REQUIRED: You must name a specific move in proposed_move. You must state exactly ONE concrete
-reason why you prefer it over the alternative (e.g. "opens the f-file for the rook",
-"fixes the backward pawn on d6", "forces the king to a worse square"). Generic phrases like
-"complex strategic landscape" or "opportunities for counterplay" are forbidden.
+REQUIRED: Name a specific move in proposed_move. State exactly ONE concrete reason
+(e.g. "opens the f-file for the rook", "fixes the backward pawn on d6", "forces the king
+to a worse square"). Generic phrases like "complex strategic landscape" are forbidden.
 Engine says: {" ".join(sf_report.get("pv", [])[:2])}. Historical was: {historical_move}.
 Pick one. Justify it in chess terms."""
 
@@ -715,6 +747,9 @@ def replay_game(game_row: dict, engine: chess.engine.SimpleEngine,
     sess_id = "replay." + hashlib.md5(f"{gid}{time.time()}".encode()).hexdigest()[:10]
     cms_ctx = build_cms_context(conn, white, black, opening)
     policy_engine = AdaptivePolicy(SUPERMODEL_DB)
+    cache_size = _load_position_cache(conn)
+    if cache_size:
+        print(f"  {DIM}Position recall: {cache_size} cached positions{R}")
 
     print(f"\n  {BOLD}{'═'*58}{R}")
     print(f"  Replaying: {SEL}{white}{R} vs {LLM}{black}{R}  {DIM}{opening}{R}")
