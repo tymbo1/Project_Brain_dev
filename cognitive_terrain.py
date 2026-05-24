@@ -321,9 +321,10 @@ def map_weakness_domains(cms_conn, sm_conn, cc_conn):
     print(f"\n  {BOLD}Region 3 — Weakness Domains{R}")
 
     rows = cms_conn.execute("""
-        SELECT p.model, p.ply, p.stockfish_eval, p.confidence, p.outcome
+        SELECT p.model, p.ply, p.stockfish_eval, p.confidence, p.agrees_with_engine
         FROM parliament_move_deliberations p
-        WHERE p.outcome IN ('validated','failed') AND p.is_consensus=0
+        WHERE p.is_consensus=0 AND p.model NOT IN ('stockfish','consensus')
+          AND p.stockfish_eval IS NOT NULL
     """).fetchall()
 
     buckets = {}
@@ -335,7 +336,7 @@ def map_weakness_domains(cms_conn, sm_conn, cc_conn):
             if key not in buckets:
                 buckets[key] = {"total": 0, "fail": 0, "conf": 0.0}
             buckets[key]["total"] += 1
-            if r["outcome"] == "failed":
+            if not r["agrees_with_engine"]:
                 buckets[key]["fail"] += 1
             buckets[key]["conf"] += float(r["confidence"] or 0.5)
 
@@ -461,10 +462,10 @@ def map_psychometric_profiles(cms_conn, sm_conn, cc_conn):
 
     rows = cms_conn.execute("""
         SELECT model, ply, stockfish_eval, agrees_with_engine,
-               agrees_with_historical, confidence, outcome
+               agrees_with_historical, confidence
         FROM parliament_move_deliberations
         WHERE is_consensus=0 AND model NOT IN ('stockfish','consensus')
-          AND outcome IN ('validated','failed')
+          AND stockfish_eval IS NOT NULL
     """).fetchall()
 
     buckets = {}
@@ -473,20 +474,19 @@ def map_psychometric_profiles(cms_conn, sm_conn, cc_conn):
         band  = eval_band(r["stockfish_eval"])
         key   = (r["model"], phase, band)
         if key not in buckets:
-            buckets[key] = {"total": 0, "eng": 0, "hist": 0, "conf": 0.0, "correct": 0}
+            buckets[key] = {"total": 0, "eng": 0, "hist": 0, "conf": 0.0}
         b = buckets[key]
         b["total"] += 1
         if r["agrees_with_engine"]:  b["eng"] += 1
         if r["agrees_with_historical"]: b["hist"] += 1
         b["conf"] += float(r["confidence"] or 0.5)
-        if r["outcome"] == "validated": b["correct"] += 1
 
     added = 0
     profiles = []
     for (model, phase, band), b in buckets.items():
         if b["total"] < 2:
             continue
-        acc  = b["correct"] / b["total"]
+        acc  = b["eng"] / b["total"]   # engine agreement rate as accuracy proxy
         conf = b["conf"] / b["total"]
         rid  = make_id(model, phase, band)
         sm_conn.execute("""
