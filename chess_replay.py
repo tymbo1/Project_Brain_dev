@@ -72,7 +72,7 @@ parser.add_argument("--synth-db",      default=str(Path.home() / "selyrion_synth
 parser.add_argument("--batch",         action="store_true", help="No pausing between games")
 parser.add_argument("--resume",        action="store_true",
                     help="Skip games already replayed (has parliament_move_deliberations)")
-parser.add_argument("--models",        default="qwen2.5:14b,llama3.1:8b,gemma3:4b,phi4-mini",
+parser.add_argument("--models",        default="qwen2.5:14b,gemma3:4b,phi4-mini",
                     help="LLM parliament models")
 parser.add_argument("--stockfish-depth", type=int, default=15,
                     help="Stockfish search depth for parliamentary analysis")
@@ -167,6 +167,35 @@ def _load_position_cache(conn: sqlite3.Connection, *_):
         "AND domain_tags LIKE '%chess%'"
     ).fetchone()[0]
     return count
+
+# ── Session conclusion history (repetition tracking) ──────────────────────────
+# Keyed by sess_id → deque of last N conclusion strings.
+# Used to inject diversity pressure and penalize repetition in scoring.
+from collections import deque
+_session_conclusions: dict[str, deque] = {}
+_CONCLUSION_HISTORY  = 3   # how many recent conclusions to show models
+_REPETITION_PENALTY  = 0.65  # multiplier applied to a model's score when it echoes recent consensus
+
+def _recent_conclusions(sess_id: str) -> list[str]:
+    return list(_session_conclusions.get(sess_id, []))
+
+def _record_conclusion(sess_id: str, conclusion: str):
+    if sess_id not in _session_conclusions:
+        _session_conclusions[sess_id] = deque(maxlen=_CONCLUSION_HISTORY)
+    _session_conclusions[sess_id].append(conclusion[:120])
+
+def _repetition_score(conclusion: str, recent: list[str]) -> float:
+    """Return penalty multiplier if conclusion echoes recent ones (keyword overlap)."""
+    if not recent or not conclusion:
+        return 1.0
+    words = set(conclusion.lower().split())
+    for prev in recent:
+        prev_words = set(prev.lower().split())
+        shared = words & prev_words - {"the", "a", "to", "of", "and", "in", "for",
+                                        "is", "on", "with", "should", "white", "black"}
+        if len(shared) >= 4:
+            return _REPETITION_PENALTY
+    return 1.0
 
 # ── ANSI ──────────────────────────────────────────────────────────────────────
 R    = "\033[0m";  BOLD = "\033[1m";  DIM = "\033[2m"
@@ -613,6 +642,15 @@ Engine says: {" ".join(sf_report.get("pv", [])[:2])}. Historical was: {historica
 Pick one. Justify it in chess terms."""
 
         tool_block = TOOL_MANIFEST if SCOS_AVAILABLE else ""
+        recent = _recent_conclusions(sess_id)
+        diversity_block = ""
+        if recent:
+            recent_fmt = "\n".join(f"  - \"{c}\"" for c in recent)
+            diversity_block = (
+                f"\nRECENT PARLIAMENT CONCLUSIONS (do NOT echo these — reason fresh from this FEN):\n"
+                f"{recent_fmt}\n"
+                f"If this position genuinely calls for a different plan, say so explicitly.\n"
+            )
         prompt = f"""You are a chess parliament member analyzing a historical game position.
 Your role: {role}
 {llama_instruction}
@@ -630,7 +668,7 @@ Deliberate on this position. Reason independently.
 Do you agree with Stockfish's preferred line? Why or why not?
 What strategic themes does this position express?
 Extract any causal insights as proposed relations.
-{tool_block}
+{diversity_block}{tool_block}
 Respond in JSON only:
 {{
   "conclusion": "NAME your recommended move first, then give ONE concrete chess reason (e.g. 'I recommend Kf5 because it centralises the king and controls the e4 square'). No generic phrases.",
@@ -733,9 +771,15 @@ Respond in JSON only:
     all_confs = [float(p.get("confidence", 0.5)) for p in positions.values()]
     avg_conf  = sum(all_confs) / len(all_confs) if all_confs else 0.5
 
+    recent = _recent_conclusions(sess_id)
+
     def weighted_score(m):
-        raw = float(positions[m].get("confidence", 0.5))
-        return raw * terrain_weights.get(m, 1.0)
+        raw    = float(positions[m].get("confidence", 0.5))
+        repeat = _repetition_score(str(positions[m].get("conclusion", "")), recent)
+        score  = raw * terrain_weights.get(m, 1.0) * repeat
+        if repeat < 1.0:
+            print(f"  {WARN}[REPEAT PENALTY]{R} {m}: score ×{repeat:.2f}")
+        return score
 
     # Apply consensus threshold — require minimum agreement fraction
     models_agreeing_with_lead = 0
@@ -749,6 +793,7 @@ Respond in JSON only:
     # If we're in a strict zone and consensus is weak, flag it
     consensus_weak = agreement_frac < policy.consensus_threshold
     consensus_text = positions[lead].get("conclusion", "")
+    _record_conclusion(sess_id, consensus_text)
     engine_agreements = sum(1 for p in positions.values()
                             if p.get("agrees_with_engine") is True)
     hist_agreements = sum(1 for p in positions.values()

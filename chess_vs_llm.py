@@ -51,7 +51,7 @@ parser.add_argument("--resume-session", default=None,            help="Resume sp
 parser.add_argument("--parliament",     action="store_true",
                     help="Enable parliament deliberation before each Selyrion move")
 parser.add_argument("--parliament-models",
-                    default="llama3:8b,gemma3:4b,phi4-mini,qwen3:4b",
+                    default="qwen2.5:14b,gemma3:4b,phi4-mini",
                     help="Models for parliament deliberation")
 parser.add_argument("--synth-db",       default=str(Path.home() / "selyrion_synth.db"),
                     help="synth.db path for parliament proposals")
@@ -260,6 +260,32 @@ def detect_motifs(text: str) -> list[str]:
     return out
 
 
+# ── Parliament session conclusion history (repetition tracking) ───────────────
+from collections import deque as _deque
+_parl_session_conclusions: dict[str, _deque] = {}
+_PARL_CONCLUSION_HISTORY = 3
+_PARL_REPETITION_PENALTY = 0.65
+
+def _parl_recent_conclusions(sess_id: str) -> list[str]:
+    return list(_parl_session_conclusions.get(sess_id, []))
+
+def _parl_record_conclusion(sess_id: str, conclusion: str):
+    if sess_id not in _parl_session_conclusions:
+        _parl_session_conclusions[sess_id] = _deque(maxlen=_PARL_CONCLUSION_HISTORY)
+    _parl_session_conclusions[sess_id].append(conclusion[:120])
+
+def _parl_repetition_score(conclusion: str, recent: list[str]) -> float:
+    if not recent or not conclusion:
+        return 1.0
+    words = set(conclusion.lower().split())
+    for prev in recent:
+        prev_words = set(prev.lower().split())
+        shared = words & prev_words - {"the", "a", "to", "of", "and", "in", "for",
+                                        "is", "on", "with", "should", "white", "black"}
+        if len(shared) >= 4:
+            return _PARL_REPETITION_PENALTY
+    return 1.0
+
 # ── Parliament deliberation engine ───────────────────────────────────────────
 
 _PARL_MODEL_COLORS = {
@@ -379,8 +405,16 @@ def _parl_parse_json(raw: str, keys: list[str]) -> dict | None:
 
 
 def _parl_first_pass_prompt(model: str, fen: str, color_name: str,
-                             cms_ctx: str) -> str:
+                             cms_ctx: str, recent: list[str] = None) -> str:
     role = _PARL_MODEL_ROLES.get(model, "independent reasoner")
+    diversity_block = ""
+    if recent:
+        recent_fmt = "\n".join(f"  - \"{c}\"" for c in recent)
+        diversity_block = (
+            f"\nRECENT PARLIAMENT CONCLUSIONS (do NOT echo these — reason fresh from this FEN):\n"
+            f"{recent_fmt}\n"
+            f"If this position genuinely calls for a different plan, say so explicitly.\n"
+        )
     return f"""You are a member of Selyrion's chess parliament.
 Your role: {role}
 
@@ -389,7 +423,7 @@ It is {color_name}'s turn.
 
 Chess knowledge substrate (CMS):
 {cms_ctx}
-
+{diversity_block}
 Reason independently. What is the best strategic plan for {color_name} here?
 Identify the key tactical themes and any concrete move ideas.
 Extract causal insights as proposed relations.
@@ -444,11 +478,12 @@ def parliament_consult(board: "chess.Board", cms_ctx: str,
     print(f"\n  {BOLD}{CMS_COL}Parliament deliberating...{R}")
     print(f"  {'─'*54}")
 
+    recent = _parl_recent_conclusions(sess_id)
     positions: dict[str, dict] = {}
     for model in models:
         col = _PARL_MODEL_COLORS.get(model, CMS_COL)
         print(f"  {col}{model:20}{R}", end=" ", flush=True)
-        prompt = _parl_first_pass_prompt(model, fen, color_name, cms_ctx)
+        prompt = _parl_first_pass_prompt(model, fen, color_name, cms_ctx, recent)
         try:
             resp = requests.post(OLLAMA_URL, json={
                 "model": model, "prompt": prompt,
@@ -493,14 +528,21 @@ def parliament_consult(board: "chess.Board", cms_ctx: str,
     synth_conn.commit()
     chess_conn.commit()
 
-    # Build consensus: weighted average, detect dissent
-    all_conclusions = [str(p.get("conclusion", "")) for p in positions.values()]
-    all_confs       = [float(p.get("confidence", 0.5)) for p in positions.values()]
-    avg_conf        = sum(all_confs) / len(all_confs) if all_confs else 0.5
+    # Build consensus: weighted average with repetition penalty, detect dissent
+    all_confs  = [float(p.get("confidence", 0.5)) for p in positions.values()]
+    avg_conf   = sum(all_confs) / len(all_confs) if all_confs else 0.5
 
-    # Lead voice = highest confidence
-    lead_model = max(positions, key=lambda m: float(positions[m].get("confidence", 0)))
+    # Lead voice = highest confidence × repetition penalty
+    def _parl_weighted(m):
+        raw    = float(positions[m].get("confidence", 0.5))
+        repeat = _parl_repetition_score(str(positions[m].get("conclusion", "")), recent)
+        if repeat < 1.0:
+            print(f"  \033[33m[REPEAT PENALTY]\033[0m {m}: score ×{repeat:.2f}")
+        return raw * repeat
+
+    lead_model     = max(positions, key=_parl_weighted)
     consensus_text = positions[lead_model].get("conclusion", "")
+    _parl_record_conclusion(sess_id, consensus_text)
 
     # Collect key insights
     insights = [
