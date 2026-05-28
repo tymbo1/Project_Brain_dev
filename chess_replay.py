@@ -52,6 +52,12 @@ try:
 except Exception:
     SCOS_AVAILABLE = False
 
+try:
+    from ssre_chess_precompute import classify_pawn_structure as _classify_pawn_structure
+    _PAWN_CLASSIFIER_AVAILABLE = True
+except Exception:
+    _PAWN_CLASSIFIER_AVAILABLE = False
+
 TOOL_MANIFEST = (
     "\nAvailable tools (optional — omit tool_calls if not needed):\n"
     "  memory.search     {\"query\": \"concept\"}              — recall CMS knowledge\n"
@@ -72,8 +78,8 @@ parser.add_argument("--synth-db",      default=str(Path.home() / "selyrion_synth
 parser.add_argument("--batch",         action="store_true", help="No pausing between games")
 parser.add_argument("--resume",        action="store_true",
                     help="Skip games already replayed (has parliament_move_deliberations)")
-parser.add_argument("--models",        default="qwen2.5:14b,gemma3:4b,phi4-mini",
-                    help="LLM parliament models")
+parser.add_argument("--models",        default="qwen2.5:7b,qwen3:4b",
+                    help="LLM parliament models (phi4-mini benched: 63% failure rate; gemma3:4b benched: VRAM swap timeout; qwen2.5:14b benched: 9GB exceeds 8GB VRAM)")
 parser.add_argument("--stockfish-depth", type=int, default=15,
                     help="Stockfish search depth for parliamentary analysis")
 parser.add_argument("--think-time",    type=float, default=0.3,
@@ -160,6 +166,35 @@ def cms_position_write(conn: sqlite3.Connection, fen: str,
               POSITION_MATURITY_STEP, meta, "chess,position"))
     conn.commit()
 
+def _cms_write_weak(conn: sqlite3.Connection, fen: str,
+                    conclusion: str, confidence: float, key_insight: str = ""):
+    """
+    Write position to CMS with minimal maturity — used when parliament
+    disagreed with engine (engine_agree_rate < 0.70). Records the position
+    exists but does not reward it with full maturity increment.
+    Skips write entirely if engine agree rate < 0.30 (caller already printed warning).
+    """
+    if confidence < POSITION_MIN_CONF:
+        return
+    canon = _fen_canonical(fen)
+    existing = conn.execute(
+        "SELECT maturity FROM anchors WHERE canonical=?", (canon,)
+    ).fetchone()
+    if not existing:
+        # First encounter only — insert at minimal maturity, don't update
+        anchor_id = "anc." + hashlib.md5(canon.encode()).hexdigest()[:10]
+        meta = json.dumps({"confidence": confidence, "fen": fen,
+                           "insight": key_insight[:200], "accuracy_gated": True})
+        conn.execute("""
+            INSERT OR IGNORE INTO anchors
+                (id, canonical, display_name, anchor_type, maturity,
+                 sources, domain_tags, visible, state)
+            VALUES (?,?,?,?,?,?,?,1,'active')
+        """, (anchor_id, canon, conclusion[:300], "position",
+              POSITION_MATURITY_STEP * 0.1, meta, "chess,position,dubious"))
+        conn.commit()
+
+
 def _load_position_cache(conn: sqlite3.Connection, *_):
     """Count known position anchors for display — CMS is the real store."""
     count = conn.execute(
@@ -174,6 +209,7 @@ from collections import deque
 # Per-model base temperatures — anchor stays cool, divergers run warmer
 _MODEL_BASE_TEMPS: dict[str, float] = {
     "qwen2.5:14b": 0.50,
+    "qwen2.5:7b":  0.50,
     "gemma3:4b":   0.70,
     "phi4-mini":   0.75,
 }
@@ -241,9 +277,11 @@ MODEL_COLORS = {
     "phi4-mini":    "\033[33m",
     "qwen3:4b":     "\033[38;5;214m",
     "qwen2.5:14b":  "\033[38;5;208m",
+    "qwen2.5:7b":   "\033[38;5;202m",
 }
 MODEL_ROLES = {
     "qwen2.5:14b":  "lead analyst — give the definitive assessment. Name the best move, explain WHY in concrete chess terms (material, king safety, pawn structure, piece activity). Be authoritative and specific.",
+    "qwen2.5:7b":   "lead analyst — give the definitive assessment. Name the best move, explain WHY in concrete chess terms (material, king safety, pawn structure, piece activity). Be authoritative and specific.",
     "llama3.1:8b":  "synthesis arbitrator — compare the engine line vs historical move, name EXACTLY which you prefer and WHY in concrete chess terms. No vague language.",
     "llama3:8b":    "synthesis arbitrator — compare the engine line vs historical move, name EXACTLY which you prefer and WHY in concrete chess terms. No vague language.",
     "gemma3:4b":    "symbolic resonance — attend to meaning, metaphor, conceptual depth",
@@ -390,8 +428,68 @@ def stockfish_report(engine: chess.engine.SimpleEngine,
 
 # ── CMS context ───────────────────────────────────────────────────────────────
 
+def query_temporal_chains(conn: sqlite3.Connection, opening: str,
+                          board: chess.Board) -> str:
+    """
+    Retrieve precomputed temporal chains from CMS for the current opening +
+    pawn structure.  Returns a compact summary string for parliament prompts.
+
+    Chains sourced from ssre_chess_precompute:
+      opening → transitions_into → pawn_structure
+      pawn_structure → pressures → pressure_theme
+      pawn_structure → leads_to → endgame_type
+    """
+    if not opening:
+        return ""
+
+    op = opening.replace("_", " ").lower()
+    lines = []
+
+    # 1. opening → transitions_into / pressures / leads_to
+    rows = conn.execute("""
+        SELECT r.predicate, a2.canonical, r.confidence
+        FROM   relations r
+        JOIN   anchors a1 ON r.subject_id = a1.id
+        JOIN   anchors a2 ON r.object_id  = a2.id
+        WHERE  LOWER(a1.canonical) = ?
+          AND  r.predicate IN ('transitions_into', 'pressures', 'leads_to')
+          AND  r.source_dataset IN ('ssre_precompute', 'ssre_pawn_cluster')
+          AND  r.confidence > 0.55
+        ORDER  BY r.confidence DESC
+        LIMIT  6
+    """, (op,)).fetchall()
+
+    if rows:
+        chain_parts = [f"{p} {o} (conf={c:.2f})" for p, o, c in rows]
+        lines.append(f"Opening trajectory ({op}): " + "; ".join(chain_parts))
+
+    # 2. pawn structure chains (if classifier available)
+    if _PAWN_CLASSIFIER_AVAILABLE:
+        try:
+            pawn_struct = _classify_pawn_structure(board)
+            ps_rows = conn.execute("""
+                SELECT r.predicate, a2.canonical, r.confidence
+                FROM   relations r
+                JOIN   anchors a1 ON r.subject_id = a1.id
+                JOIN   anchors a2 ON r.object_id  = a2.id
+                WHERE  LOWER(a1.canonical) = ?
+                  AND  r.predicate IN ('pressures', 'leads_to', 'weakens', 'opens_file', 'similar_to')
+                  AND  r.source_dataset IN ('ssre_precompute', 'ssre_pawn_cluster')
+                  AND  r.confidence > 0.40
+                ORDER  BY r.confidence DESC
+                LIMIT  5
+            """, (pawn_struct.lower(),)).fetchall()
+            if ps_rows:
+                ps_parts = [f"{p} {o} (conf={c:.2f})" for p, o, c in ps_rows]
+                lines.append(f"Pawn structure ({pawn_struct}): " + "; ".join(ps_parts))
+        except Exception:
+            pass
+
+    return "\n".join(lines)
+
+
 def build_cms_context(conn: sqlite3.Connection, white: str, black: str,
-                      opening: str) -> str:
+                      opening: str, board: chess.Board = None) -> str:
     parts = []
 
     rows = conn.execute("""
@@ -417,6 +515,12 @@ def build_cms_context(conn: sqlite3.Connection, white: str, black: str,
 
     if opening:
         parts.append(f"Opening: {opening}")
+
+    # Temporal chains: opening → structure → pressure → endgame trajectory
+    if board is not None:
+        chains = query_temporal_chains(conn, opening, board)
+        if chains:
+            parts.append("Trajectory chains (precomputed):\n" + chains)
 
     return "\n".join(parts) if parts else "Chess CMS context sparse."
 
@@ -804,7 +908,19 @@ Respond in JSON only:
         terrain_weights = load_psychometric_weights()
 
     all_confs = [float(p.get("confidence", 0.5)) for p in positions.values()]
-    avg_conf  = sum(all_confs) / len(all_confs) if all_confs else 0.5
+    if all_confs:
+        mean_conf = sum(all_confs) / len(all_confs)
+        # Variance-weighted: penalise hidden parliament disagreement.
+        # high variance (fractured parliament) → lower effective confidence.
+        variance  = sum((c - mean_conf) ** 2 for c in all_confs) / len(all_confs)
+        stability = max(0.5, 1.0 - variance * 0.5)
+        avg_conf  = round(mean_conf * stability, 4)
+        if variance > 0.05:
+            print(f"  {WARN}[VARIANCE]{R} conf_mean={mean_conf:.2f}  "
+                  f"variance={variance:.3f}  stability={stability:.2f}  "
+                  f"→ adj_conf={avg_conf:.2f}")
+    else:
+        avg_conf = 0.5
 
     recent = _recent_conclusions(sess_id)
 
@@ -901,11 +1017,21 @@ Respond in JSON only:
         "positions":           positions,
     }
 
-    # Write position memory to CMS (conf-gated, maturity-bounded — no inflation)
+    # Write position memory to CMS — accuracy-gated.
+    # Only boost maturity if parliament agreed with engine on this move.
+    # Blunder positions must not inflate motif scores.
     best_insight = max(positions.values(),
                        key=lambda p: float(p.get("confidence", 0)),
                        default={}).get("key_insight", "")
-    cms_position_write(conn, fen, consensus_text, avg_conf, best_insight)
+    engine_agree_rate = engine_agreements / len(positions) if positions else 0.0
+    if engine_agree_rate >= 0.70:
+        cms_position_write(conn, fen, consensus_text, avg_conf, best_insight)
+    else:
+        # Write with capped maturity step — position reached via dubious move
+        _cms_write_weak(conn, fen, consensus_text, avg_conf, best_insight)
+        if engine_agree_rate < 0.30:
+            print(f"  {WARN}[CMS SKIP]{R} engine_agree={engine_agree_rate:.0%} "
+                  f"— position not trusted, maturity not incremented")
 
     # Claude post-consensus review — runs on curriculum/weak_consensus or --claude-review flag
     if args.claude_review or policy.curriculum_flag or consensus_weak:
@@ -939,7 +1065,7 @@ def replay_game(game_row: dict, engine: chess.engine.SimpleEngine,
         return {"skipped": True, "reason": "no moves stored"}
 
     sess_id = "replay." + hashlib.md5(f"{gid}{time.time()}".encode()).hexdigest()[:10]
-    cms_ctx = build_cms_context(conn, white, black, opening)
+    cms_ctx = build_cms_context(conn, white, black, opening)  # static fallback; overridden per-ply below
     policy_engine = AdaptivePolicy(SUPERMODEL_DB)
     cache_size = _load_position_cache(conn)
     if cache_size:
@@ -983,6 +1109,9 @@ def replay_game(game_row: dict, engine: chess.engine.SimpleEngine,
 
             # Re-evaluate policy now that we have the actual eval
             dp = policy_engine.for_position(ply, sf["eval"], opening)
+
+            # Rebuild context with live board so temporal chains reflect current pawn structure
+            cms_ctx = build_cms_context(conn, white, black, opening, board=board)
 
             print(f"\n  {DIM}Ply {ply} | {historical_san}{R}")
             result = parliament_position(
