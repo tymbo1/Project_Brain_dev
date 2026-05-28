@@ -287,9 +287,12 @@ if __name__ == "__main__":
     parser.add_argument("--model", default=DEFAULT_MODEL,
                         choices=list(_MODELS.keys()) + list(_MODELS.values()),
                         help="haiku (default) / sonnet / opus")
+    parser.add_argument("--scope", default="all",
+                        choices=list(_SCOPE_TAGS.keys()),
+                        help="Context scope: all/chess/sandbox/architecture/code")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
     q      = " ".join(args.question)
-    result = advise(q, model=args.model, verbose=args.verbose)
+    result = advise(q, model=args.model, scope=args.scope, verbose=args.verbose)
     print_advice(result)
