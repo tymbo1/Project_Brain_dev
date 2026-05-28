@@ -65,7 +65,7 @@ _PROPOSE_WORDS = {
 _SEARCH_WORDS = {
     "search", "find", "what", "recall", "tell", "explain", "about",
     "show", "lookup", "look", "know", "knowledge", "retrieve", "fetch",
-    "describe", "definition", "define",
+    "describe", "definition", "define", "github", "repositories", "repos",
 }
 _CODE_WORDS = {
     "run", "execute", "calculate", "compute", "script", "fibonacci",
@@ -103,7 +103,7 @@ def classify_intent(prompt: str) -> list[str]:
         intents.append("propose")
     if words & _PARLIAMENT_WORDS:
         intents.append("parliament")
-    if (words & _SEARCH_WORDS) and not intents:
+    if words & _SEARCH_WORDS:
         intents.append("search")
     if words & _CODE_WORDS:
         intents.append("code")

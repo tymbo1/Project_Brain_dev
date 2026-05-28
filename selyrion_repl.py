@@ -422,6 +422,16 @@ def main():
             except EOFError:
                 print()
                 break
+            # Absorb any immediately-following lines from a multi-line paste
+            # (readline delivers them as buffered input before the next prompt)
+            import select
+            while select.select([sys.stdin], [], [], 0.05)[0]:
+                try:
+                    extra = input("")
+                    if extra.strip():
+                        raw = raw.rstrip() + " " + extra.strip()
+                except EOFError:
+                    break
             if not handle_input(raw, args.no_parliament, args.domain):
                 break
     except KeyboardInterrupt:
