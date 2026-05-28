@@ -165,6 +165,8 @@ _HELP_TEXT = f"""
   {SEL}list{R}              Same as proposals
   {SEL}history{R}           Show this session's turns
   {SEL}paste{R}             Enter multi-line paste mode (submit with ---)
+  {SEL}load <file>{R}       Load file as task input (txt, md, json)
+  {SEL}feedback <file>{R}   Load file as mentor feedback → stored + advise
   {SEL}advise [question]{R}              Ask Claude for architectural guidance
   {SEL}advise --scope chess [q]{R}       Scope context to chess domain only
   {SEL}advise --sonnet --scope arch [q]{R} Sonnet + architecture context
@@ -280,6 +282,75 @@ def handle_input(raw: str, default_no_parliament: bool, default_domain: str) -> 
         arg = " ".join(words[1:]) if len(words) > 1 else ""
         pid = ctx.resolve_id(arg)
         _expand_proposal(pid, no_parliament=default_no_parliament)
+        return True
+
+    # ── Load file as task ─────────────────────────────────────────────────────
+    if words[0] == "load":
+        if len(words) < 2:
+            print(f"  {WARN}Usage: load <filepath>{R}")
+            return True
+        path = Path(" ".join(words[1:]).strip().strip("'\""))
+        if not path.exists():
+            path = Path.home() / path  # try relative to home
+        if not path.exists():
+            print(f"  {ERR}[not found]{R} {path}")
+            return True
+        try:
+            content = path.read_text(errors="replace").strip()
+            if len(content) > 8000:
+                content = content[:8000]
+                print(f"  {WARN}[truncated to 8000 chars]{R}")
+            print(f"  {DIM}Loaded {path.name} ({len(content)} chars) — submitting as task…{R}")
+            ctx.add_turn("you", f"[load:{path.name}] {content[:100]}")
+            # Re-enter handle_input with the file content as the prompt
+            return handle_input(content, default_no_parliament, default_domain)
+        except Exception as e:
+            print(f"  {ERR}[error]{R} {e}")
+        return True
+
+    # ── Load file as mentor feedback ──────────────────────────────────────────
+    if words[0] == "feedback":
+        if len(words) < 2:
+            print(f"  {WARN}Usage: feedback <filepath>{R}")
+            return True
+        path = Path(" ".join(words[1:]).strip().strip("'\""))
+        if not path.exists():
+            path = Path.home() / path
+        if not path.exists():
+            print(f"  {ERR}[not found]{R} {path}")
+            return True
+        try:
+            content = path.read_text(errors="replace").strip()
+            if len(content) > 12000:
+                content = content[:12000]
+                print(f"  {WARN}[truncated to 12000 chars]{R}")
+            # Store as discovery in claudecode.db
+            import hashlib as _hl, time as _t, sqlite3 as _sq
+            body = f"mentor_feedback [{path.name}]: {content[:400]}"
+            did  = "disc." + _hl.md5(body[:40].encode()).hexdigest()[:8]
+            try:
+                _db = _sq.connect(str(Path.home() / "claudecode.db"))
+                _db.execute(
+                    "INSERT OR IGNORE INTO discoveries "
+                    "(id,session_id,body,tags,importance,created_at) VALUES (?,?,?,?,?,?)",
+                    (did, ctx.session_id, body, "selyrion,feedback,mentor", 4, _t.time())
+                )
+                _db.commit(); _db.close()
+                print(f"  {OK}[stored]{R} {path.name} → claudecode.db (importance=4)")
+            except Exception as e:
+                print(f"  {WARN}[db write failed]{R} {e}")
+            # Now advise on the feedback
+            summary = content[:300].replace("\n", " ")
+            print(f"  {DIM}Running advisor on feedback…{R}")
+            from selyrion_advisor import advise, print_advice
+            result = advise(
+                f"I received the following mentor feedback. What are the most important architectural insights and what should I act on first?\n\n{content[:3000]}",
+                model="sonnet", scope="architecture"
+            )
+            print_advice(result)
+            ctx.add_turn("selyrion", f"[feedback/{path.name}] {result.get('text','')[:120]}")
+        except Exception as e:
+            print(f"  {ERR}[error]{R} {e}")
         return True
 
     # ── Advise (Claude CLI) ───────────────────────────────────────────────────
