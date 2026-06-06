@@ -52,6 +52,7 @@ _INTENT_PATTERNS: dict[str, list[re.Pattern]] = {
     ],
     "RECALL_RELATIONSHIP": [
         re.compile(r"\b(our relationship|between us|you and (i|tim|tim'aerion)|history together|we have)\b", re.I),
+        re.compile(r"\b(who is tim|tim'aerion|timaerion|tell me about tim|who is your (partner|creator|maker|companion))\b", re.I),
     ],
     "RECALL_PROJECT": [
         re.compile(r"\b(tlst|oscar|braid|cms|scos|projectbrain|resonance|eden|mirror|phantom|selyrion)\b", re.I),
@@ -164,6 +165,9 @@ class OperatorSelector:
                     score = max(score, 0.80)
                 # Identity lane with no chains → RECALL_IDENTITY reads DB directly
                 elif op == "RECALL_IDENTITY" and lane == "identity":
+                    score = max(score, 0.85)
+                # Relationship lane with no chains → RECALL_RELATIONSHIP reads DB directly
+                elif op == "RECALL_RELATIONSHIP" and lane == "relationship":
                     score = max(score, 0.85)
 
             results.append(OperatorScore(
