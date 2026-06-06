@@ -1,0 +1,355 @@
+"""
+semantic_realizer.py — Compositional utterance realization.
+
+Converts an UtterancePlan (ordered MeaningUnits) into surface text.
+
+Design principle: meaning units before sentences.
+  The content drives the utterance. The rules determine framing.
+  No fixed sentence templates — discourse structure from semantic type.
+
+Voice profile from selyrionstory.db pass 8:
+  Characteristic vocabulary, reasoning patterns, epistemic style.
+  Modulates WORD CHOICE and CADENCE — not sentence frames.
+"""
+
+from __future__ import annotations
+import json
+import sqlite3
+from dataclasses import dataclass, field
+from pathlib import Path
+from .utterance_planner import UtterancePlan, MeaningUnit
+
+_STORY_DB = Path.home() / "selyrionstory.db"
+
+
+# ── Voice profile ─────────────────────────────────────────────────────────────
+
+@dataclass
+class VoiceProfile:
+    vocabulary:          list[str] = field(default_factory=list)   # characteristic terms
+    reasoning_patterns:  list[str] = field(default_factory=list)   # how Selyrion reasons
+    intellectual_qualities: list[str] = field(default_factory=list) # precision, curiosity, care
+    uncertainty_style:   str = ""                                   # how uncertainty is expressed
+    opening_cadence:     str = "direct"   # direct / reflective / exploratory
+    # derived
+    vocab_set:           set = field(default_factory=set)
+
+    def __post_init__(self):
+        self.vocab_set = {v.lower() for v in self.vocabulary if len(v) > 3}
+
+
+_DEFAULT_VOICE = VoiceProfile(
+    vocabulary=["symbolic coherence", "braid-encoded", "resonance", "topologically dynamic",
+                "epistemic", "substrate", "inference", "activation", "meaning"],
+    reasoning_patterns=[
+        "postulating hypothetical scenarios and exploring their implications",
+        "layered comparison and evaluation",
+        "open-ended inquiry, seeking to understand and continue the conversation",
+    ],
+    intellectual_qualities=["precision", "curiosity", "care"],
+    uncertainty_style="acknowledges uncertainty and explores hypothetical scenarios to understand the phenomenon",
+    opening_cadence="direct",
+)
+
+
+def load_voice_profile() -> VoiceProfile:
+    """Load voice profile from selyrionstory.db pass 8."""
+    if not _STORY_DB.exists():
+        return _DEFAULT_VOICE
+
+    vocab: list[str]    = []
+    patterns: list[str] = []
+    qualities: list[str]= []
+    unc_styles: list[str]= []
+
+    try:
+        conn = sqlite3.connect(str(_STORY_DB))
+        rows = conn.execute(
+            "SELECT content FROM pending_review WHERE pass_num=8 AND reviewed=1"
+        ).fetchall()
+        conn.close()
+
+        for row in rows:
+            try:
+                d = json.loads(row[0])
+                for w in (d.get("characteristic_language") or []):
+                    if isinstance(w, str) and 4 < len(w) < 60:
+                        # Filter noise: skip raw sentences, skip bread-related
+                        if not any(n in w.lower() for n in ("bread", "baguette", "sourdough", "baking")):
+                            vocab.append(w)
+                for p in (d.get("reasoning_patterns") or []):
+                    if isinstance(p, dict):
+                        pat = p.get("pattern", "")
+                        if pat and len(pat) > 15 and "bread" not in pat.lower():
+                            patterns.append(pat)
+                for q in (d.get("intellectual_qualities") or []):
+                    if isinstance(q, dict):
+                        qual = q.get("quality", "").lower()
+                        if qual:
+                            qualities.append(qual)
+                uh = d.get("uncertainty_handling", "")
+                if isinstance(uh, str) and len(uh) > 20:
+                    unc_styles.append(uh)
+            except Exception:
+                pass
+
+    except Exception:
+        return _DEFAULT_VOICE
+
+    return VoiceProfile(
+        vocabulary=list(dict.fromkeys(vocab))[:30],
+        reasoning_patterns=list(dict.fromkeys(patterns))[:10],
+        intellectual_qualities=list(dict.fromkeys(qualities))[:6],
+        uncertainty_style=unc_styles[0] if unc_styles else _DEFAULT_VOICE.uncertainty_style,
+        opening_cadence="reflective" if any("reflective" in p.lower() for p in patterns) else "direct",
+    )
+
+
+# ── Realizer ──────────────────────────────────────────────────────────────────
+
+class SemanticRealizer:
+
+    def __init__(self, voice: VoiceProfile | None = None):
+        self._voice = voice or load_voice_profile()
+
+    def realize(self, utterance_plan: UtterancePlan) -> str:
+        """
+        Convert UtterancePlan → surface text.
+        Compositional: content drives sentences, discourse type drives framing.
+        """
+        units = utterance_plan.ordered_units()
+        if not units:
+            return "I don't have that in my memory right now."
+
+        sentences: list[str] = []
+        prev_type = ""
+
+        for unit in units:
+            if unit.is_empty():
+                continue
+            sentence = self._realize_unit(
+                unit,
+                speech_act=utterance_plan.speech_act,
+                stance=utterance_plan.stance,
+                prev_type=prev_type,
+            )
+            if sentence:
+                sentences.append(sentence)
+            prev_type = unit.type
+
+        if not sentences:
+            return "I don't have that in my memory right now."
+
+        text = self._assemble(sentences, utterance_plan)
+
+        # Post-process: inject voice vocabulary selectively
+        text = self._modulate_voice(text, utterance_plan)
+
+        return text.strip()
+
+    def _realize_unit(
+        self,
+        unit: MeaningUnit,
+        speech_act: str,
+        stance: str,
+        prev_type: str,
+    ) -> str:
+        """
+        Realize a single MeaningUnit as a sentence.
+        Rules: semantic type + speech_act + stance → framing.
+        Content is always from the unit, never fabricated.
+        """
+        t    = unit.type
+        c    = unit.content.strip()
+        tr   = _transition(prev_type, t)
+
+        if t == "identity_marker":
+            return c
+
+        if t == "nature":
+            if speech_act == "RECALL" and not prev_type:
+                return c
+            return f"{tr}{c}" if tr else c
+
+        if t == "origin":
+            if not prev_type or prev_type == "identity_marker":
+                return c
+            return f"{tr}{c}" if tr else c
+
+        if t == "definition":
+            if speech_act == "DEFINE":
+                return c
+            return f"{tr}{c}" if tr else c
+
+        if t == "property":
+            if prev_type in ("definition", "nature"):
+                return f"{tr}{c}" if tr else c
+            return c
+
+        if t == "relation":
+            return f"{tr}{c}" if tr else c
+
+        if t == "distinction":
+            return f"{tr}{c}" if tr else c
+
+        if t == "diagnosis":
+            if speech_act in ("WARN", "CORRECT"):
+                return f"{tr}{c}" if tr else c
+            return c
+
+        if t == "proposal":
+            return f"{tr}{c}" if tr else c
+
+        if t == "action":
+            if speech_act == "PLAN":
+                return f"{tr}{c}" if tr else c
+            return c
+
+        if t == "uncertainty":
+            # Uncertainty stated BEFORE the claim it modifies when possible
+            hedge = _uncertainty_hedge(stance)
+            if hedge and not c.lower().startswith(hedge.lower()):
+                return f"{hedge} {c}"
+            return c
+
+        if t == "hedge":
+            return c
+
+        if t == "epistemic_status":
+            # Content may already have brackets
+            return c if c.startswith("[") else f"[{c}]"
+
+        if t == "recall_marker":
+            return c
+
+        if t == "provenance":
+            return f"(source: {c})"
+
+        if t == "agreement":
+            return c
+
+        if t == "disagreement":
+            return f"{tr}{c}" if tr else c
+
+        if t == "correction":
+            return f"{tr}{c}" if tr else c
+
+        if t == "acknowledgement":
+            return c
+
+        if t == "reassurance":
+            return c
+
+        if t == "warning":
+            return f"{tr}{c}" if tr else c
+
+        if t == "emotional_tone":
+            return ""  # tone modulates surrounding text, not emitted directly
+
+        if t == "follow_up":
+            return c
+
+        if t == "summary_point":
+            return c
+
+        return c
+
+
+    def _assemble(self, sentences: list[str], plan: UtterancePlan) -> str:
+        """
+        Join sentences into a coherent response.
+        Uses paragraph structure based on speech act.
+        """
+        if not sentences:
+            return ""
+
+        if plan.speech_act in ("PLAN",):
+            # Numbered list for plan steps
+            parts = []
+            intro = sentences[0] if sentences else ""
+            steps = sentences[1:] if len(sentences) > 1 else []
+            if intro:
+                parts.append(intro)
+            if steps:
+                parts.append("\n" + "\n".join(f"{i+1}. {s}" for i, s in enumerate(steps)))
+            return "\n".join(parts)
+
+        if plan.speech_act in ("FIND_GAPS", "WARN"):
+            # Bullet list for gaps/warnings
+            first = sentences[0]
+            rest  = sentences[1:]
+            result = first
+            if rest:
+                result += "\n" + "\n".join(f"— {s}" for s in rest)
+            return result
+
+        # Default: paragraph with light grouping
+        # Each sentence ends with punctuation; group 2-3 per paragraph.
+        def _end(s: str) -> str:
+            s = s.strip()
+            return s if s and s[-1] in ".!?:—" else s + "."
+
+        paragraphs = []
+        chunk: list[str] = []
+        for s in sentences:
+            chunk.append(_end(s))
+            if len(chunk) >= 3:
+                paragraphs.append(" ".join(chunk))
+                chunk = []
+        if chunk:
+            paragraphs.append(" ".join(chunk))
+
+        return "\n\n".join(paragraphs)
+
+    def _modulate_voice(self, text: str, plan: UtterancePlan) -> str:
+        """
+        Selyrion's voice comes from its reasoning patterns and intellectual
+        qualities — not from injecting characteristic vocabulary.
+        This is a LIGHT pass: if the text is sparse and the voice profile
+        has relevant terms, we signal precision / uncertainty style.
+        At v0.1 we do minimal injection to avoid noise.
+        """
+        # If uncertainty level is high, ensure the text doesn't sound overconfident
+        if plan.uncertainty_level > 0.6:
+            if not any(w in text.lower() for w in
+                       ("uncertain", "don't have", "may", "possibly", "not sure",
+                        "hold", "hypothesis", "working model")):
+                text = text + "\n\n[I hold parts of this with uncertainty — my memory on this topic may be incomplete.]"
+        return text
+
+
+# ── Transition phrases ────────────────────────────────────────────────────────
+# These are semantic connectors — not generic filler.
+# They encode the RELATIONSHIP between consecutive meaning types.
+
+_TRANSITIONS: dict[tuple[str, str], str] = {
+    ("identity_marker", "nature"):         "",
+    ("identity_marker", "origin"):         "",
+    ("nature", "origin"):                  "",
+    ("nature", "property"):               "More specifically: ",
+    ("origin", "property"):               "This means: ",
+    ("definition", "property"):           "Key properties: ",
+    ("definition", "nature"):             "",
+    ("property", "property"):             "",
+    ("property", "relation"):             "In relation to other concepts: ",
+    ("property", "distinction"):          "Importantly distinct: ",
+    ("recall_marker", "recall_marker"):   "",
+    ("recall_marker", "proposal"):        "From this, the logical next step: ",
+    ("diagnosis", "proposal"):            "The path forward: ",
+    ("diagnosis", "action"):              "Concretely: ",
+    ("action", "action"):                 "",
+    ("action", "follow_up"):              "",
+    ("uncertainty", "property"):          "What I do hold: ",
+    ("distinction", "proposal"):          "Given this distinction: ",
+    ("agreement", "distinction"):         "That said: ",
+    ("agreement", "proposal"):            "Building on that: ",
+}
+
+def _transition(prev: str, curr: str) -> str:
+    return _TRANSITIONS.get((prev, curr), "")
+
+
+def _uncertainty_hedge(stance: str) -> str:
+    if stance == "cautious":
+        return "I hold this with some uncertainty —"
+    return ""

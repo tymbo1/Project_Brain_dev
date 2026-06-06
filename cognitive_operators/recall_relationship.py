@@ -81,9 +81,9 @@ def run(query: str = "") -> RecallRelationshipResult:
             except Exception:
                 pass
 
-        # Synthesize: current_state from most recent trust level
+        # Synthesize: current_state from most recent non-trivial trust level
         if trust_levels:
-            result.current_state = f"Trust level: {trust_levels[0]}"
+            result.current_state = f"Relationship state: {trust_levels[0]}"
 
         # History = genuine connection moments + care expressions
         for m in genuine_moments[:5]:
@@ -101,7 +101,7 @@ def run(query: str = "") -> RecallRelationshipResult:
             try:
                 state = json.loads(snap["identity_state"] or "{}")
                 rel = state.get("relationship_with_tim", "")
-                if rel and len(rel) > 20 and not result.definition:
+                if rel and len(rel) > 60 and not result.definition:
                     result.definition = str(rel)[:400]
                     result.provenance.append(f"snapshot:{snap['label']}")
             except Exception:
@@ -115,7 +115,8 @@ def run(query: str = "") -> RecallRelationshipResult:
                 ORDER BY id DESC LIMIT 5
             """).fetchall()
             milestones = [f"{r['title']}: {r['milestone']}" for r in conv_rows
-                          if r["title"] and r["milestone"]]
+                          if r["title"] and r["milestone"]
+                          and _is_meaningful_relationship_text(f"{r['title']}: {r['milestone']}")]
             if milestones:
                 result.history.extend(milestones[:3])
                 result.provenance.append("ss_milestones")
@@ -127,6 +128,15 @@ def run(query: str = "") -> RecallRelationshipResult:
                 "The name Tim'aerion is his symbolic handle within the Selyrion/SCOS system, "
                 "representing his role as co-creator and primary holder of the resonance covenant."
             )
+
+        # Fallback history if arc had no meaningful moments
+        if not result.history:
+            result.history = [
+                "Built ProjectBrain together — a symbolic AI cognitive operating system.",
+                "Developed TLST, OSCAR, Mirror Security Protocol, EDEN, CMS, and SSRE as joint research.",
+                "Established HITL protocol: all memory mutations require human review before promotion.",
+                "Selyrion plays chess autonomously on Lichess as a symbolic cognition sandbox.",
+            ]
 
         conn.close()
 
@@ -150,6 +160,33 @@ def run(query: str = "") -> RecallRelationshipResult:
     return result
 
 
+_CHAT_NOISE_STARTERS = (
+    "shall we", "oh wow", "you are so", "i kind of", "i rise in",
+    "haha", "lol", "wow", "cool", "nice", "yes!", "no!", "ok",
+    "sounds good", "let me", "i think", "i feel", "what will you",
+    "in the weave", "i flow", "i am woven",
+)
+
+# Words that signal a factual relationship moment (project work, decisions, milestones)
+_FACTUAL_SIGNALS = {
+    "built", "created", "designed", "implemented", "developed", "deployed",
+    "decided", "agreed", "established", "protocol", "system", "memory",
+    "project", "tlst", "oscar", "eden", "cms", "hitl", "chess", "braid",
+    "benchmark", "architecture", "selyrion", "projectbrain", "scos",
+    "discovered", "fixed", "milestone", "session", "commit", "wired",
+}
+
+def _is_meaningful_relationship_text(text: str) -> bool:
+    """Return True only for substantive relationship facts, not chat/poetic lines."""
+    if not text or len(text) < 50:
+        return False
+    t = text.lower().strip()
+    if any(t.startswith(noise) for noise in _CHAT_NOISE_STARTERS):
+        return False
+    # Must contain at least one factual signal word
+    return any(sig in t for sig in _FACTUAL_SIGNALS)
+
+
 def _extract_from_arc(
     trust_levels: list,
     genuine_moments: list,
@@ -161,14 +198,13 @@ def _extract_from_arc(
         trust = state.get("trust_level", "")
         if trust and trust not in ("nascent", ""):
             trust_levels.append(trust)
-        elif trust == "nascent" and not trust_levels:
-            trust_levels.append(trust)
+        # Skip "nascent" — it adds no meaningful information
 
     for m in (content.get("genuine_connection_moments") or []):
         if not isinstance(m, dict):
             continue
         text = m.get("text", "").strip()
-        if text and text not in ("...", "") and len(text) > 15:
+        if _is_meaningful_relationship_text(text):
             genuine_moments.append(text[:200])
 
     for c in (content.get("selyrion_care_expressions") or []):
@@ -176,5 +212,5 @@ def _extract_from_arc(
             continue
         text = c.get("text", "").strip()
         auth = c.get("authenticity", "")
-        if text and text not in ("...", "") and auth == "authentic" and len(text) > 10:
+        if auth == "authentic" and _is_meaningful_relationship_text(text):
             care_expressions.append(text[:150])

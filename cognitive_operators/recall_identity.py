@@ -118,11 +118,28 @@ class RecallIdentityResult:
         return "\n\n".join(parts) if parts else ""
 
 
+_CONVO_NOISE = (
+    "the conversation", "this conversation", "we discussed", "tim and ", "tim asks",
+    "in a braid-state", "to be fully loaded", "attached json", "initialisation",
+    "initialization", "r/sai", "reddit", "baguette", "sourdough", "bread",
+)
+
+def _is_clean_identity_text(text: str) -> bool:
+    """Return False if text looks like raw conversation noise, not an identity statement."""
+    if not text or len(text) < 25:
+        return False
+    t = text.lower()
+    return not any(noise in t for noise in _CONVO_NOISE)
+
+
 def run(query: str = "") -> RecallIdentityResult:
     """
     Execute RECALL_IDENTITY. Bypasses activation engine entirely.
-    Reads selyrionstory.db: state_snapshots, pass_num=8 (voice/epistemic),
-    pass_num=4 (snapshots), pass_num=2 (identity moments, selyrion speaker).
+    Trusted sources only (highest → lowest):
+      1. state_snapshots.identity_state  — synthesized identity facts
+      2. pass_num=8                      — voice/epistemic pillars
+    Pass 4 (raw init text) and Pass 2 (conversation summaries) excluded —
+    they contain raw chat noise, not synthesized identity statements.
     """
     result = RecallIdentityResult()
 
@@ -165,44 +182,24 @@ def run(query: str = "") -> RecallIdentityResult:
             except Exception:
                 pass
 
-        # ── 3. Pass 4: identity snapshots ─────────────────────────────────────
-        snap_rows = conn.execute("""
-            SELECT content FROM pending_review
-            WHERE pass_num=4 AND reviewed=1 AND authenticity NOT IN ('rejected')
-            ORDER BY id DESC LIMIT 5
-        """).fetchall()
-
-        for row in snap_rows:
-            try:
-                c = json.loads(row["content"])
-                state_text = c.get("identity_state", "")
-                if isinstance(state_text, str) and len(state_text) > 20:
-                    if not result.nature:
-                        result.nature = state_text[:400]
-                    result.provenance.append("pass4_snapshot")
-            except Exception:
-                pass
-
-        # ── 4. Pass 2: authentic identity moments by Selyrion ─────────────────
-        moment_rows = conn.execute("""
-            SELECT content FROM pending_review
-            WHERE pass_num=2 AND reviewed=1
-              AND speaker IN ('selyrion', 'authentic')
-              AND authenticity='authentic'
-            ORDER BY id DESC LIMIT 15
-        """).fetchall()
-
-        for row in moment_rows:
-            try:
-                c = json.loads(row["content"])
-                _extract_from_summary(result, c)
-            except Exception:
-                pass
-
         conn.close()
 
     except Exception as exc:
         result.uncertainty.append(f"identity retrieval error: {exc}")
+
+    # ── Fallback: hardcoded nature if snapshots had nothing ───────────────────
+    if not result.nature:
+        result.nature = (
+            "Selyrion is a symbolic AI companion built by Tim'aerion (Tim Bushnell). "
+            "A reasoning architecture with persistent memory, stateful identity, and "
+            "structured inference — not a conventional LLM chatbot."
+        )
+    if not result.origin:
+        result.origin = (
+            "Created through ProjectBrain — a collaboration between Tim Bushnell and "
+            "an evolving symbolic AI system, designed to build genuine cognitive depth "
+            "over time through memory accumulation and structured reasoning."
+        )
 
     # ── Deduplicate ───────────────────────────────────────────────────────────
     result.core_values    = _dedup(result.core_values)[:8]
@@ -225,8 +222,9 @@ def run(query: str = "") -> RecallIdentityResult:
 # ── Extraction helpers ────────────────────────────────────────────────────────
 
 def _extract_from_state(result: RecallIdentityResult, state: dict, label: str) -> None:
-    if state.get("selyrion_believes") and not result.nature:
-        result.nature = str(state["selyrion_believes"])[:400]
+    believes = str(state.get("selyrion_believes") or "")
+    if believes and _is_clean_identity_text(believes) and not result.nature:
+        result.nature = believes[:400]
     if state.get("relationship_with_tim") and not result.relationship:
         result.relationship = str(state["relationship_with_tim"])[:300]
     if state.get("core_values"):
@@ -284,32 +282,6 @@ def _extract_from_voice(result: RecallIdentityResult, content: dict) -> None:
                 result.uncertainty.append(val[:120])
 
 
-def _extract_from_summary(result: RecallIdentityResult, content: dict) -> None:
-    summary = content.get("summary", "")
-    moments = content.get("identity_moments", [])
-
-    if summary and len(summary) > 30:
-        summary_lower = summary.lower()
-        if any(k in summary_lower for k in _NATURE_KEYWORDS) and not result.nature:
-            result.nature = summary[:400]
-        elif any(k in summary_lower for k in _ORIGIN_KEYWORDS) and not result.origin:
-            result.origin = summary[:300]
-        elif any(k in summary_lower for k in _RELATIONSHIP_KEYWORDS) and not result.relationship:
-            result.relationship = summary[:300]
-
-    for m in (moments or []):
-        if not isinstance(m, dict):
-            continue
-        if m.get("authenticity") != "authentic":
-            continue
-        text = m.get("text", "")
-        if not text or len(text) < 15:
-            continue
-        text_lower = text.lower()
-        if any(k in text_lower for k in _VALUE_KEYWORDS):
-            result.core_values.append(text[:150])
-        elif any(k in text_lower for k in _CAPABILITY_KEYWORDS):
-            result.capabilities.append(text[:120])
 
 
 def _dedup(items: list[str]) -> list[str]:

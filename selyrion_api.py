@@ -94,6 +94,19 @@ except Exception as _cog_exc:
     print(f"[cognitive_operators] unavailable: {_cog_exc}")
     _cog_run_pipeline = None
 
+# ── Language Cognition Layer ──────────────────────────────────────────────────
+_langcog_ok = False
+_langcog_voice = None
+try:
+    from language_cognition.pipeline import run_language_cognition, rewrite_instruction
+    from language_cognition.semantic_realizer import load_voice_profile as _load_voice
+    _langcog_ok = True
+    print("[language_cognition] loaded OK")
+except Exception as _lc_exc:
+    print(f"[language_cognition] unavailable: {_lc_exc}")
+    run_language_cognition = None
+    rewrite_instruction = None
+
 # ── EDEN bootstrap (optional — graceful if missing deps) ──────────────────────
 
 _eden_chat = None
@@ -821,8 +834,24 @@ async def chat(req: ChatRequest, x_admin_token: Optional[str] = Header(default=N
             return StreamingResponse(no_memory_stream(), media_type="text/event-stream",
                                      headers={"Cache-Control": "no-cache"})
 
+        # ── Language Cognition Layer (personal path) ─────────────────────────
+        _lc_result = None
+        if _langcog_ok and _cog_pipeline_ok and 'plan' in dir():
+            try:
+                _lc_result = await loop.run_in_executor(
+                    None,
+                    lambda: run_language_cognition(
+                        query=last_user,
+                        response_plan=plan,
+                        history=[{"role": m.role, "content": m.content} for m in req.messages[:-1]],
+                    )
+                )
+                cog_plan_display = _lc_result.text or cog_plan_display
+            except Exception as _lc_e:
+                print(f"[langcog] personal path error: {_lc_e}")
+
         if SUBSTRATE_ONLY or SEL_GUI_MODE == "substrate_direct":
-            # Bypass Qwen — prefer formatted cognitive operator output, fall back to raw substrate
+            # Bypass Qwen — Language Cognition realized text (no-LLM path)
             _sub_text = cog_plan_display or substrate or "I don't have that in my memory right now."
             async def substrate_direct_stream():
                 words = _sub_text.split(" ")
@@ -837,9 +866,15 @@ async def chat(req: ChatRequest, x_admin_token: Optional[str] = Header(default=N
             return StreamingResponse(substrate_direct_stream(), media_type="text/event-stream",
                                      headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-        # substrate_first mode: Qwen rewrite-only from substrate
-        system = (base_system + "\n\n" + context_block + "\n\n" +
-                  _REWRITE_ONLY_INSTRUCTION.format(substrate=substrate))
+        # substrate_first: Language Cognition structured substrate → Qwen rewrite
+        if _lc_result and _langcog_ok:
+            # Give Qwen the structured utterance plan — speech act + meaning units + constraints
+            lc_substrate = rewrite_instruction(_lc_result)
+            system = base_system + "\n\n" + lc_substrate
+        else:
+            # Fallback: old raw substrate
+            system = (base_system + "\n\n" + context_block + "\n\n" +
+                      _REWRITE_ONLY_INSTRUCTION.format(substrate=substrate))
         use_articulator = False
 
     else:
@@ -861,15 +896,27 @@ async def chat(req: ChatRequest, x_admin_token: Optional[str] = Header(default=N
                     plan_text = plan.to_substrate_text()
                     if plan_text.strip():
                         cog_plan_display = _format_plan_for_display(plan)
-                        cog_context = (
-                            f"\n\n[COGNITIVE ANALYSIS — {plan.speech_act}]"
-                            f" (confidence={plan.confidence:.2f}):\n{plan_text}"
-                        )
+                        cog_context = plan_text   # fallback if langcog unavailable
             except Exception as _pe:
                 print(f"[cog_pipeline] knowledge path error: {_pe}")
 
+        # ── Language Cognition Layer (knowledge path) ────────────────────────
+        _lc_result_k = None
+        if _langcog_ok and _cog_pipeline_ok and 'plan' in dir():
+            try:
+                _lc_result_k = await loop.run_in_executor(
+                    None,
+                    lambda: run_language_cognition(
+                        query=last_user,
+                        response_plan=plan,
+                        history=[{"role": m.role, "content": m.content} for m in req.messages[:-1]],
+                    )
+                )
+                cog_plan_display = _lc_result_k.text or cog_plan_display
+            except Exception as _lc_ke:
+                print(f"[langcog] knowledge path error: {_lc_ke}")
+
         if SUBSTRATE_ONLY:
-            # All lanes bypass Qwen — formatted cognitive operator output preferred.
             _so_text = (cog_plan_display
                         or context_block.strip()
                         or "I don't have enough symbolic memory to answer that yet.")
@@ -886,11 +933,16 @@ async def chat(req: ChatRequest, x_admin_token: Optional[str] = Header(default=N
             return StreamingResponse(substrate_only_stream(), media_type="text/event-stream",
                                      headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-        system = base_system
-        if context_block:
-            system += "\n\n" + context_block
-        if cog_context:
-            system += cog_context
+        # Language Cognition structured substrate → Qwen
+        if _lc_result_k and _langcog_ok:
+            system = base_system + "\n\n" + rewrite_instruction(_lc_result_k)
+        else:
+            system = base_system
+            if context_block:
+                system += "\n\n" + context_block
+            if cog_context:
+                system += f"\n\n[COGNITIVE ANALYSIS — {getattr(plan, 'speech_act', '')}] " \
+                          f"(confidence={getattr(plan, 'confidence', 0):.2f}):\n{cog_context}"
 
         if SEL_GUI_MODE == "langeng_first" and packet.knowledge_prose:
             # Return LangEng prose directly, skip Qwen
@@ -1080,6 +1132,7 @@ async def health():
         "identity_grounding": len(_identity_grounding) > 0,
         "memory_router":      _mem_router._router_instance is not None,
         "cognitive_operators": _cog_pipeline_ok,
+        "language_cognition":  _langcog_ok,
         "substrate_only_mode": SUBSTRATE_ONLY,
         "qwen_only_mode":     QWEN_ONLY,
         "gui_mode":           SEL_GUI_MODE,
@@ -1117,6 +1170,14 @@ async def startup():
     await loop.run_in_executor(None, _load_activation_engine)
     await loop.run_in_executor(None, _load_articulator)
     await loop.run_in_executor(None, _load_identity)
+    # Pre-load Language Cognition voice profile
+    if _langcog_ok:
+        try:
+            global _langcog_voice
+            _langcog_voice = await loop.run_in_executor(None, _load_voice)
+            print(f"[langcog_voice] loaded ({len(_langcog_voice.vocabulary)} vocab terms)")
+        except Exception as _lv_e:
+            print(f"[langcog_voice] load failed: {_lv_e}")
     SYSTEM_PROMPT = _build_system_prompt()
     await _ping_ollama()
     # Init memory router with all available engines
