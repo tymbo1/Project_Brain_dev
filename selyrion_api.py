@@ -59,6 +59,13 @@ SEL_GUI_MODE = os.environ.get("SEL_GUI_MODE", "substrate_first")
 
 SUBSTRATE_ONLY = os.environ.get("SELYRION_SUBSTRATE_ONLY", "").lower() in ("1", "true", "yes")
 
+# ── Qwen-only mode ────────────────────────────────────────────────────────────
+# SELYRION_QWEN_ONLY=true  → bypass all memory routing and cognitive operators.
+# Qwen answers from base system prompt only — no substrate, no identity DB.
+# Use for 3-way comparison test: Qwen-only vs Selyrion-only vs Selyrion+Qwen.
+
+QWEN_ONLY = os.environ.get("SELYRION_QWEN_ONLY", "").lower() in ("1", "true", "yes")
+
 # ── Ollama config ─────────────────────────────────────────────────────────────
 
 OLLAMA_URL   = os.environ.get("OLLAMA_URL", "http://localhost:11434")
@@ -640,6 +647,99 @@ SUBSTRATE (speak from this — do not add to it):
 """
 
 
+def _format_plan_for_display(plan) -> str:
+    """
+    Render a ResponsePlan as readable plain text for substrate-only display.
+    Uses raw operator_output dict for richer formatting than to_substrate_text().
+    """
+    if plan.speech_act == "UNCERTAIN" or not plan.claims:
+        return ""
+
+    op  = plan.operator_used
+    out = plan.operator_output
+    lines: list[str] = []
+
+    if op == "RECALL_IDENTITY":
+        nature = out.get("nature", "")
+        origin = out.get("origin", "")
+        if nature:
+            lines.append(nature)
+        if origin and origin != nature:
+            lines.append(origin)
+        values = out.get("core_values", [])
+        if values:
+            lines.append("\nCore principles:")
+            for v in values[:4]:
+                lines.append(f"  • {str(v)[:200]}")
+        caps = out.get("capabilities", [])
+        if caps:
+            lines.append("\nCapabilities:")
+            for c in caps[:3]:
+                lines.append(f"  • {str(c)[:150]}")
+        rel = out.get("relationship", "")
+        if rel:
+            lines.append(f"\nRelationship with Tim'aerion: {str(rel)[:300]}")
+
+    elif op == "RECALL_RELATIONSHIP":
+        defn = out.get("definition", "")
+        if defn:
+            lines.append(defn)
+        history = out.get("history", [])
+        for h in history[:4]:
+            if h:
+                lines.append(f"  • {str(h)[:200]}")
+        state = out.get("current_state", "")
+        if state:
+            lines.append(f"\nCurrent: {str(state)[:300]}")
+
+    elif op == "RECALL_PROJECT":
+        defn = out.get("definition", "") or out.get("project_summary", "")
+        if defn:
+            lines.append(defn)
+        state = out.get("current_state", "")
+        if state:
+            lines.append(f"\nStatus: {str(state)[:300]}")
+        history = out.get("history", [])
+        for h in history[:3]:
+            if h:
+                lines.append(f"  • {str(h)[:200]}")
+
+    elif op == "PLAN_NEXT":
+        actions = out.get("actions", [])
+        if actions:
+            lines.append("Next steps:")
+            for a in actions[:6]:
+                if isinstance(a, dict):
+                    action = a.get("action", "")
+                    rationale = a.get("rationale", "")
+                    u = a.get("utility", 0.0)
+                    lines.append(f"  • {action}  (utility={u:.2f})")
+                    if rationale:
+                        lines.append(f"    {rationale[:150]}")
+                else:
+                    lines.append(f"  • {str(a)[:150]}")
+
+    elif op == "DEFINE":
+        defn = out.get("definition", "")
+        if defn:
+            lines.append(defn)
+        props = out.get("properties", [])
+        if props:
+            lines.append("Properties: " + "; ".join(str(p)[:80] for p in props[:4]))
+        related = out.get("related", [])
+        if related:
+            lines.append("Related: " + ", ".join(str(r)[:60] for r in related[:4]))
+
+    else:
+        for c in plan.claims[:6]:
+            lines.append(f"• {c}")
+
+    if plan.uncertainties:
+        lines.append("\n[Uncertainty: " + "; ".join(str(u)[:100] for u in plan.uncertainties[:2]) + "]")
+
+    return "\n".join(lines).strip()
+
+
 @app.post("/chat")
 async def chat(req: ChatRequest, x_admin_token: Optional[str] = Header(default=None)):
     is_admin = (x_admin_token == ADMIN_TOKEN)
@@ -657,6 +757,21 @@ async def chat(req: ChatRequest, x_admin_token: Optional[str] = Header(default=N
         return StreamingResponse(blocked_stream(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache"})
 
+    # ── Qwen-only mode: skip all memory and cognitive operators ─────────────────
+    if QWEN_ONLY:
+        base_system = _build_system_prompt()
+        async def qwen_only_stream():
+            if _ollama_ok:
+                async for chunk in _stream_ollama(req.messages, base_system,
+                                                  bypass_output_guard=is_admin):
+                    yield chunk
+            else:
+                async for chunk in _stream_fallback(last_user):
+                    yield chunk
+            yield "data: [DONE]\n\n"
+        return StreamingResponse(qwen_only_stream(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
     # ── Route memory ──────────────────────────────────────────────────────────
     loop = asyncio.get_event_loop()
     packet = await loop.run_in_executor(
@@ -673,30 +788,31 @@ async def chat(req: ChatRequest, x_admin_token: Optional[str] = Header(default=N
 
     if packet.is_personal():
         substrate = packet.substrate_text
+        cog_plan_display = ""  # formatted plan text for substrate-only display
 
-        # ── Cognitive operators: augment personal substrate with structured plan ──
-        # RECALL_PROJECT runs over selyrionstory.db; inject its output into substrate.
-        if _cog_pipeline_ok and packet.knowledge_chains:
+        # ── Cognitive operators: RECALL_IDENTITY/RELATIONSHIP/PROJECT read selyrionstory.db
+        # directly — no knowledge_chains needed. Always run for personal lane.
+        if _cog_pipeline_ok:
             try:
+                _chains = packet.knowledge_chains or []
                 plan = await loop.run_in_executor(
                     None,
                     lambda: _cog_run_pipeline(
                         query=last_user,
-                        chains=packet.knowledge_chains,
+                        chains=_chains,
                         source_lane=packet.memory_source,
                         operator_hint=packet.memory_source,
                     )
                 )
-                if plan.ready_for_langeng and plan.to_substrate_text().strip():
-                    op_text = plan.to_substrate_text()
-                    if substrate:
-                        substrate = substrate + "\n\n" + op_text
-                    else:
-                        substrate = op_text
+                if plan.ready_for_langeng:
+                    op_text = plan.to_substrate_text().strip()
+                    cog_plan_display = _format_plan_for_display(plan)
+                    if op_text:
+                        substrate = (substrate + "\n\n" + op_text) if substrate else op_text
             except Exception as _pe:
                 print(f"[cog_pipeline] personal path error: {_pe}")
 
-        if not substrate:
+        if not substrate and not cog_plan_display:
             # No memory found — honest response, no hallucination
             async def no_memory_stream():
                 msg = "I don't have that in my memory right now."
@@ -706,9 +822,8 @@ async def chat(req: ChatRequest, x_admin_token: Optional[str] = Header(default=N
                                      headers={"Cache-Control": "no-cache"})
 
         if SUBSTRATE_ONLY or SEL_GUI_MODE == "substrate_direct":
-            # Bypass Qwen entirely — return substrate text directly as Selyrion's voice
-            # SUBSTRATE_ONLY applies to all lanes; substrate_direct is personal-only legacy mode
-            _sub_text = substrate or "I don't have that in my memory right now."
+            # Bypass Qwen — prefer formatted cognitive operator output, fall back to raw substrate
+            _sub_text = cog_plan_display or substrate or "I don't have that in my memory right now."
             async def substrate_direct_stream():
                 words = _sub_text.split(" ")
                 chunk_size = 4
@@ -731,7 +846,7 @@ async def chat(req: ChatRequest, x_admin_token: Optional[str] = Header(default=N
         # ── Knowledge path: cognitive operators → structured ResponsePlan ──────
         # Pipeline: chains → WorkingMemoryPacket → operator → ResponsePlan → Qwen
         cog_context = ""
-        cog_plan_text = ""   # raw plan text for SUBSTRATE_ONLY bypass
+        cog_plan_display = ""  # formatted plan text for substrate-only display
         if _cog_pipeline_ok and packet.knowledge_chains:
             try:
                 plan = await loop.run_in_executor(
@@ -745,7 +860,7 @@ async def chat(req: ChatRequest, x_admin_token: Optional[str] = Header(default=N
                 if plan.ready_for_langeng:
                     plan_text = plan.to_substrate_text()
                     if plan_text.strip():
-                        cog_plan_text = plan_text.strip()
+                        cog_plan_display = _format_plan_for_display(plan)
                         cog_context = (
                             f"\n\n[COGNITIVE ANALYSIS — {plan.speech_act}]"
                             f" (confidence={plan.confidence:.2f}):\n{plan_text}"
@@ -754,9 +869,8 @@ async def chat(req: ChatRequest, x_admin_token: Optional[str] = Header(default=N
                 print(f"[cog_pipeline] knowledge path error: {_pe}")
 
         if SUBSTRATE_ONLY:
-            # All lanes bypass Qwen — return cognitive operator plan text directly.
-            # Prefer plan text; fall back to router context_block; then honest empty.
-            _so_text = (cog_plan_text
+            # All lanes bypass Qwen — formatted cognitive operator output preferred.
+            _so_text = (cog_plan_display
                         or context_block.strip()
                         or "I don't have enough symbolic memory to answer that yet.")
             async def substrate_only_stream():
@@ -967,6 +1081,7 @@ async def health():
         "memory_router":      _mem_router._router_instance is not None,
         "cognitive_operators": _cog_pipeline_ok,
         "substrate_only_mode": SUBSTRATE_ONLY,
+        "qwen_only_mode":     QWEN_ONLY,
         "gui_mode":           SEL_GUI_MODE,
         "story_db":           _STORY_DB.exists(),
         "ollama":             _ollama_ok,
