@@ -50,6 +50,15 @@ def _require_admin(x_admin_token: Optional[str] = Header(default=None)):
 
 SEL_GUI_MODE = os.environ.get("SEL_GUI_MODE", "substrate_first")
 
+# ── Substrate-only mode ───────────────────────────────────────────────────────
+# SELYRION_SUBSTRATE_ONLY=true  → ALL lanes bypass Qwen entirely.
+# Returns cognitive operator plan.to_substrate_text() with metadata header.
+# This is the LLM-independence test mode: Selyrion answers from symbolic memory alone.
+# Personal lane: uses existing substrate_text + operator augmentation.
+# Knowledge lane: runs cognitive pipeline, returns plan text directly.
+
+SUBSTRATE_ONLY = os.environ.get("SELYRION_SUBSTRATE_ONLY", "").lower() in ("1", "true", "yes")
+
 # ── Ollama config ─────────────────────────────────────────────────────────────
 
 OLLAMA_URL   = os.environ.get("OLLAMA_URL", "http://localhost:11434")
@@ -696,11 +705,12 @@ async def chat(req: ChatRequest, x_admin_token: Optional[str] = Header(default=N
             return StreamingResponse(no_memory_stream(), media_type="text/event-stream",
                                      headers={"Cache-Control": "no-cache"})
 
-        if SEL_GUI_MODE == "substrate_direct":
+        if SUBSTRATE_ONLY or SEL_GUI_MODE == "substrate_direct":
             # Bypass Qwen entirely — return substrate text directly as Selyrion's voice
-            # This is the safest mode: zero hallucination risk on personal memories
+            # SUBSTRATE_ONLY applies to all lanes; substrate_direct is personal-only legacy mode
+            _sub_text = substrate or "I don't have that in my memory right now."
             async def substrate_direct_stream():
-                words = substrate.split(" ")
+                words = _sub_text.split(" ")
                 chunk_size = 4
                 for i in range(0, len(words), chunk_size):
                     piece = " ".join(words[i:i+chunk_size])
@@ -721,6 +731,7 @@ async def chat(req: ChatRequest, x_admin_token: Optional[str] = Header(default=N
         # ── Knowledge path: cognitive operators → structured ResponsePlan ──────
         # Pipeline: chains → WorkingMemoryPacket → operator → ResponsePlan → Qwen
         cog_context = ""
+        cog_plan_text = ""   # raw plan text for SUBSTRATE_ONLY bypass
         if _cog_pipeline_ok and packet.knowledge_chains:
             try:
                 plan = await loop.run_in_executor(
@@ -734,12 +745,32 @@ async def chat(req: ChatRequest, x_admin_token: Optional[str] = Header(default=N
                 if plan.ready_for_langeng:
                     plan_text = plan.to_substrate_text()
                     if plan_text.strip():
+                        cog_plan_text = plan_text.strip()
                         cog_context = (
                             f"\n\n[COGNITIVE ANALYSIS — {plan.speech_act}]"
                             f" (confidence={plan.confidence:.2f}):\n{plan_text}"
                         )
             except Exception as _pe:
                 print(f"[cog_pipeline] knowledge path error: {_pe}")
+
+        if SUBSTRATE_ONLY:
+            # All lanes bypass Qwen — return cognitive operator plan text directly.
+            # Prefer plan text; fall back to router context_block; then honest empty.
+            _so_text = (cog_plan_text
+                        or context_block.strip()
+                        or "I don't have enough symbolic memory to answer that yet.")
+            async def substrate_only_stream():
+                words = _so_text.split(" ")
+                chunk_size = 4
+                for i in range(0, len(words), chunk_size):
+                    piece = " ".join(words[i:i+chunk_size])
+                    if i + chunk_size < len(words):
+                        piece += " "
+                    yield f"data: {json.dumps({'text': piece})}\n\n"
+                    await asyncio.sleep(0.01)
+                yield "data: [DONE]\n\n"
+            return StreamingResponse(substrate_only_stream(), media_type="text/event-stream",
+                                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
         system = base_system
         if context_block:
@@ -935,6 +966,8 @@ async def health():
         "identity_grounding": len(_identity_grounding) > 0,
         "memory_router":      _mem_router._router_instance is not None,
         "cognitive_operators": _cog_pipeline_ok,
+        "substrate_only_mode": SUBSTRATE_ONLY,
+        "gui_mode":           SEL_GUI_MODE,
         "story_db":           _STORY_DB.exists(),
         "ollama":             _ollama_ok,
         "model":              OLLAMA_MODEL,
