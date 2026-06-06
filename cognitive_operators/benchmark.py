@@ -150,6 +150,60 @@ BENCHMARK_CASES: list[BenchCase] = [
         notes="Sparse two-hop chain — should still produce an explanation with uncertainty",
     ),
 
+    # ── FIND_GAPS ─────────────────────────────────────────────────────────────
+    BenchCase(
+        name="find_gaps_llm_independence",
+        query="What's missing to reduce LLM dependence?",
+        lane="knowledge",
+        expected_operator="FIND_GAPS",
+        chains=[
+            "llm independence | requires | dense CMS coverage | strength: 0.88",
+            "llm independence | requires | EXPLAIN operator | strength: 0.85",
+            "llm independence | requires | COMPARE operator | strength: 0.80",
+            "llm independence | requires | FIND_GAPS operator | strength: 0.78",
+            "llm independence | depends_on | substrate quality | strength: 0.82",
+            "dense CMS coverage | requires | ingestion pipeline | strength: 0.75",
+            "EXPLAIN operator | is_a | cognitive operator | strength: 0.90",
+        ],
+        notes="COMPARE operator and substrate quality not well represented — should show as gaps",
+    ),
+
+    BenchCase(
+        name="find_gaps_selyrion_deployment",
+        query="What's needed before Selyrion can be deployed?",
+        lane="project",
+        expected_operator="FIND_GAPS",
+        chains=[
+            "selyrion deployment | requires | selyrion_api stability | strength: 0.90",
+            "selyrion deployment | requires | domain registration | strength: 0.85",
+            "selyrion deployment | requires | authentication system | strength: 0.82",
+            "selyrion deployment | depends_on | ghost layer | strength: 0.78",
+            "selyrion deployment | needs | rate limiting | strength: 0.72",
+            "selyrion_api stability | is_a | api service | strength: 0.88",
+            "selyrion_api stability | has_property | tested | strength: 0.70",
+        ],
+        notes="domain registration, authentication, rate limiting absent from packet",
+    ),
+
+    BenchCase(
+        name="find_gaps_full_coverage",
+        query="What's missing from the chess domain?",
+        lane="project",
+        expected_operator="FIND_GAPS",
+        chains=[
+            "chess domain | requires | opening theory | strength: 0.80",
+            "chess domain | requires | endgame tables | strength: 0.78",
+            "chess domain | requires | positional concepts | strength: 0.85",
+            "opening theory | is_a | chess knowledge | strength: 0.90",
+            "opening theory | has_property | well-seeded | strength: 0.85",
+            "endgame tables | is_a | chess knowledge | strength: 0.88",
+            "endgame tables | has_property | partially ingested | strength: 0.70",
+            "positional concepts | is_a | chess knowledge | strength: 0.86",
+            "positional concepts | has_property | seeded | strength: 0.75",
+        ],
+        notes="opening theory is well-represented so low gap; endgame/positional partially covered",
+    ),
+
     # ── RECALL_IDENTITY ───────────────────────────────────────────────────────
     BenchCase(
         name="recall_identity_who",

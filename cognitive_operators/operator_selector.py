@@ -61,7 +61,10 @@ _INTENT_PATTERNS: dict[str, list[re.Pattern]] = {
         re.compile(r'\b(caused by|why did|what led to|trace|root cause|origin of)\b', re.I),
     ],
     "FIND_GAPS": [
-        re.compile(r'\b(what.s missing|gaps in|what do we need|what is needed|requirements for)\b', re.I),
+        re.compile(r'\b(what.s missing|what is missing|gaps in|what are the gaps)\b', re.I),
+        re.compile(r'\b(what do we need|what is needed|what.s needed|what are we missing)\b', re.I),
+        re.compile(r'\b(requirements for|missing from|needed before|not yet built|what.s left)\b', re.I),
+        re.compile(r'\b(before .+ can|prerequisite|what.s required|what is required)\b', re.I),
     ],
     "CHECK_CONTRADICTION": [
         re.compile(r'\b(contradiction|conflict|inconsistency|does .+ contradict|is it true that)\b', re.I),

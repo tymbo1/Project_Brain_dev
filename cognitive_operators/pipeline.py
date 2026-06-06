@@ -33,7 +33,7 @@ from __future__ import annotations
 from .working_memory    import build_packet, WorkingMemoryPacket
 from .operator_selector import select_operator, OperatorSelector
 from .response_planner  import ResponsePlanner, ResponsePlan, build_plan
-from . import define, explain, recall_project, recall_identity, plan_next, check_contradiction, assess_confidence
+from . import define, explain, find_gaps, recall_project, recall_identity, plan_next, check_contradiction, assess_confidence
 
 _selector = OperatorSelector()
 _planner  = ResponsePlanner()
@@ -149,7 +149,10 @@ def _run_operator(
     elif op_name == "EXPLAIN":
         return explain.run(packet).as_dict()
 
+    elif op_name == "FIND_GAPS":
+        return find_gaps.run(packet).as_dict()
+
     else:
-        # COMPARE, TRACE_CAUSE, FIND_GAPS — stubs until built
+        # COMPARE, TRACE_CAUSE — stubs until built
         # Fall through to DEFINE as best available approximation
         return define.run(packet).as_dict()
