@@ -90,6 +90,8 @@ _RULES: list[PragmaticRule] = [
         trigger_patterns=[
             re.compile(r'\b(gives? zero|no output|nothing|empty output|not working|broken|failed|failing|garbage|useless|doesn.t work|zero cognition|wrong answers|wrong results|wrong output)\b', re.I),
             re.compile(r'\b(still wrong|still broken|still failing|still garbage|still not)\b', re.I),
+            re.compile(r'\b(down|offline|unavailable|unreachable|not responding|crashed|not accessible)\b', re.I),
+            re.compile(r'\b(what.s (actually |really )?(wrong|broken|failing)|what (is|went) wrong|what.s wrong)\b', re.I),
         ],
         inferred_intent="report_failure",
         pragmatic_act="DIAGNOSE",
@@ -126,6 +128,8 @@ _RULES: list[PragmaticRule] = [
             re.compile(r"\b(that.s not|that.s wrong|that is wrong|you.re wrong|you got .+ (wrong|backwards)|not what i mean|not what i want|you misunderstood|wrong approach|not a renderer|not templates?)\b", re.I),
             re.compile(r"\b(i said|i meant|i.ve said|i have said|i told you|as i said|i.ve told you|i.ve corrected|i have corrected|that.s not right|you said .+ but|actually,? .+ is)\b", re.I),
             re.compile(r"^(no(?!-)|nope|wrong|incorrect|not quite|that misses)\b", re.I),
+        re.compile(r"\b(it.s not a|it is not a|it does not use|it doesn.t use|doesn.t (use|apply|function as|work as)|that.s not how|that is not how)\b", re.I),
+        re.compile(r"\b(you are not (a|an)|you.re not (a|an)|you are not \w|i am not (a|an))\b", re.I),
         ],
         inferred_intent="correct_prior_model",
         pragmatic_act="CORRECT",
@@ -222,11 +226,12 @@ _RULES: list[PragmaticRule] = [
         priority=9,  # Specific planning > meta_architecture's structural discussion
         trigger_patterns=[
             re.compile(r'\b(what should we (build|do|work on|tackle|implement|create|develop) next)\b', re.I),
-            re.compile(r'\b(next (step|milestone|task|move|thing to build)|what.s the next (step|milestone|task|move))\b', re.I),
+            re.compile(r'\b(next (step|milestone|task|move|thing to build|build)|what.s the next (step|milestone|task|move|build)|what is the next (step|milestone|task|move|build))\b', re.I),
             re.compile(r'\b(give me the roadmap|roadmap for (completing|finishing|building|phase|getting))\b', re.I),
             re.compile(r'\b(how do we get from .{0,30} to .{0,30} (cases|tests|examples))\b', re.I),
             re.compile(r'\bhow should we (approach|organize|sequence|plan)\b', re.I),
             re.compile(r'\bwhat.s the (build|complete|full|fastest|right|best)? ?path\b', re.I),
+            re.compile(r'\b(what would fix|how (do we|should we|to) fix|what fixes|what.s the fix for)\b', re.I),
             re.compile(r'\b(what should we build after|after .+ passes?)\b', re.I),
             re.compile(r'\b(give me the plan|lay out the plan|what.s the plan for|plan for phase)\b', re.I),
         ],
@@ -370,6 +375,7 @@ _RULES: list[PragmaticRule] = [
             # "remember X" — but not "does X remember Y" (third-person factual questions)
             re.compile(r'\b(do you remember|can you recall|what stage .+ at|what stage is|what is .+ (working on|building|doing|developing|making)|what.s .+ (working on|doing))\b', re.I),
             re.compile(r'\b(our .+(work|project|build|progress)|current state|project status|recap .+|recapitulate|history of .+|give me a summary of)\b', re.I),
+            re.compile(r'\b(what were we (working on|building|doing|developing)|and before that .+(we|were)|before that what)\b', re.I),
         ],
         inferred_intent="project_status_inquiry",
         pragmatic_act="RECALL",
@@ -384,7 +390,7 @@ _RULES: list[PragmaticRule] = [
         name="explanation_query",
         priority=7,  # Above definition_query (6) — "what is the failure mode" should be ASSERT not DEFINE
         trigger_patterns=[
-            re.compile(r'\b(explain|how does .+ (work|function|retrieve|process|handle|operate|run|compute|infer|calculate)|how do .+ work|walk me through|how .+ works)\b', re.I),
+            re.compile(r'\b(explain|describe|how does .+ (work|function|retrieve|process|handle|operate|run|compute|infer|calculate|relate)|how do .+ work|walk me through|how .+ works)\b', re.I),
             re.compile(r'\b(why does|why do|why is|why was|why are|what causes|what makes .+ work|what does .+ do)\b', re.I),
             re.compile(r'\b(what happens when|what happens if)\b', re.I),
             re.compile(r'\bif\s+\S+\s+is\s+(off|down|disabled|missing).+\bwhat\b', re.I),
@@ -398,6 +404,25 @@ _RULES: list[PragmaticRule] = [
         must_not=["dump raw capsules", "be verbose without structure"],
         must_do=["explain mechanism clearly", "use structure"],
         depth_required="technical",
+    ),
+
+    PragmaticRule(
+        name="continuation_query",
+        priority=5,
+        trigger_patterns=[
+            re.compile(r'^(and|also)\s+(the|what about|how about|what of|tell me about)\b', re.I),
+            re.compile(r'^(what about|how about|and what about)\s+\w', re.I),
+            re.compile(r'^(so\s+)?(what|how|tell me)\s+(about|does|is)\s+\w', re.I),
+            re.compile(r'^and\s+(that|this|it)\s+\w', re.I),
+            re.compile(r'^and\s+before\s+(that|this|then)\b', re.I),
+        ],
+        inferred_intent="topic_continuation",
+        pragmatic_act="ASSERT",
+        emotional_signal="neutral",
+        repair_needed=False,
+        must_not=["introduce unrelated topic"],
+        must_do=["answer in context of prior exchange"],
+        depth_required="standard",
     ),
 
     PragmaticRule(
@@ -600,12 +625,13 @@ class PragmaticsEngine:
                 best_row = alt_best
 
             r = best_row
+            _pragmatic_act = r[1] or "ASSERT"
             return PragmaticReading(
                 literal_act="",
-                pragmatic_act=r[1] or "ASSERT",
+                pragmatic_act=_pragmatic_act,
                 inferred_intent=r[0] or "",
                 emotional_signal=r[2] or "neutral",
-                repair_needed=False,
+                repair_needed=_pragmatic_act in ("CORRECT", "DIAGNOSE"),
                 must_not=json.loads(r[3] or "[]"),
                 must_do=json.loads(r[4] or "[]"),
                 depth_required=r[5] or "standard",
