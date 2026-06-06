@@ -97,6 +97,59 @@ BENCHMARK_CASES: list[BenchCase] = [
         notes="'What is X?' is DEFINE even in project lane; 'Tell me about X' → RECALL_PROJECT",
     ),
 
+    # ── EXPLAIN ───────────────────────────────────────────────────────────────
+    BenchCase(
+        name="explain_photosynthesis",
+        query="How does photosynthesis work?",
+        lane="knowledge",
+        expected_operator="EXPLAIN",
+        chains=[
+            "photosynthesis | requires | sunlight | strength: 0.90",
+            "photosynthesis | requires | carbon dioxide | strength: 0.89",
+            "sunlight | enables | light reactions | strength: 0.88",
+            "light reactions | produces | ATP | strength: 0.85",
+            "light reactions | produces | NADPH | strength: 0.83",
+            "ATP | enables | calvin cycle | strength: 0.87",
+            "NADPH | enables | calvin cycle | strength: 0.85",
+            "calvin cycle | produces | glucose | strength: 0.91",
+            "carbon dioxide | requires | calvin cycle | strength: 0.80",
+            "photosynthesis | leads_to | oxygen release | strength: 0.92",
+            "chlorophyll | enables | light absorption | strength: 0.90",
+            "light absorption | leads_to | light reactions | strength: 0.88",
+        ],
+        notes="Multi-step causal chain: light → reactions → ATP → calvin cycle → glucose",
+    ),
+
+    BenchCase(
+        name="explain_python_generator_mechanism",
+        query="How do Python generators work?",
+        lane="knowledge",
+        expected_operator="EXPLAIN",
+        chains=[
+            "yield statement | causes | function suspension | strength: 0.95",
+            "function suspension | produces | generator object | strength: 0.90",
+            "generator object | requires | next() call | strength: 0.88",
+            "next() call | leads_to | execution resume | strength: 0.92",
+            "execution resume | leads_to | next yield | strength: 0.85",
+            "generator exhaustion | causes | StopIteration | strength: 0.93",
+            "generator object | enables | lazy evaluation | strength: 0.87",
+            "lazy evaluation | contributes_to | memory efficiency | strength: 0.80",
+        ],
+        notes="Mechanism chain: yield → suspension → generator → next() → resume",
+    ),
+
+    BenchCase(
+        name="explain_sparse_single_hop",
+        query="Why does TLST predict frame dragging?",
+        lane="project",
+        expected_operator="EXPLAIN",
+        chains=[
+            "TLST | causes | spacetime tension | strength: 0.72",
+            "spacetime tension | leads_to | frame dragging | strength: 0.68",
+        ],
+        notes="Sparse two-hop chain — should still produce an explanation with uncertainty",
+    ),
+
     # ── RECALL_IDENTITY ───────────────────────────────────────────────────────
     BenchCase(
         name="recall_identity_who",
