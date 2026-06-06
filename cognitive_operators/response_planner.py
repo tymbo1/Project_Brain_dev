@@ -184,6 +184,22 @@ class ResponsePlanner:
         elif op == "EXPLAIN":
             plan.claims = out.get("causal_chain", []) or out.get("claims", [])
 
+        elif op == "COMPARE":
+            a, b = out.get("subject_a", ""), out.get("subject_b", "")
+            verdict = out.get("verdict", "")
+            sim = out.get("similarity", 0.0)
+            if verdict and a and b:
+                plan.claims.append(f"{a} and {b} are {verdict} (similarity={sim:.2f})")
+            for f in (out.get("shared") or [])[:3]:
+                if isinstance(f, dict):
+                    plan.claims.append(f"shared: {f.get('predicate')} {f.get('value')}")
+            for f in (out.get("only_a") or [])[:2]:
+                if isinstance(f, dict):
+                    plan.claims.append(f"only {a}: {f.get('predicate')} {f.get('value')}")
+            for f in (out.get("only_b") or [])[:2]:
+                if isinstance(f, dict):
+                    plan.claims.append(f"only {b}: {f.get('predicate')} {f.get('value')}")
+
         elif op == "PLAN_NEXT":
             for action in (out.get("actions") or [])[:5]:
                 if isinstance(action, dict):

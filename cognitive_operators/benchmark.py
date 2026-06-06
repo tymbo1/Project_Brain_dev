@@ -150,6 +150,66 @@ BENCHMARK_CASES: list[BenchCase] = [
         notes="Sparse two-hop chain — should still produce an explanation with uncertainty",
     ),
 
+    # ── COMPARE ───────────────────────────────────────────────────────────────
+    BenchCase(
+        name="compare_generator_vs_list",
+        query="Compare Python generators and list comprehensions.",
+        lane="knowledge",
+        expected_operator="COMPARE",
+        chains=[
+            "python generator | is_a | iterator | strength: 0.92",
+            "python generator | used_for | lazy evaluation | strength: 0.90",
+            "python generator | has_property | memory efficient | strength: 0.88",
+            "python generator | uses | yield keyword | strength: 0.95",
+            "python generator | enables | infinite sequences | strength: 0.85",
+            "list comprehension | is_a | list | strength: 0.93",
+            "list comprehension | used_for | eager evaluation | strength: 0.88",
+            "list comprehension | has_property | materialises in memory | strength: 0.85",
+            "list comprehension | uses | bracket syntax | strength: 0.90",
+            "python generator | contrasts_with | list comprehension | strength: 0.80",
+            "list comprehension | contrasts_with | python generator | strength: 0.80",
+        ],
+        notes="Different types (iterator vs list), different memory model — verdict: different/distinct",
+    ),
+
+    BenchCase(
+        name="compare_tlst_vs_gr",
+        query="How does TLST differ from general relativity?",
+        lane="project",
+        expected_operator="COMPARE",
+        chains=[
+            "TLST | is_a | theoretical framework | strength: 0.85",
+            "TLST | hypothesized_as | alternative to general relativity | strength: 0.80",
+            "TLST | proposed_by | tim'aerion | strength: 0.88",
+            "TLST | used_for | cosmological predictions | strength: 0.72",
+            "general relativity | is_a | physical theory | strength: 0.95",
+            "general relativity | used_for | gravitational predictions | strength: 0.93",
+            "general relativity | has_property | experimentally confirmed | strength: 0.92",
+            "general relativity | proposed_by | einstein | strength: 0.99",
+            "TLST | contrasts_with | general relativity | strength: 0.75",
+        ],
+        notes="Different epistemic status — TLST hypothesis vs GR established; verdict: different",
+    ),
+
+    BenchCase(
+        name="compare_cms_vs_eden",
+        query="Compare CMS and EDEN.",
+        lane="project",
+        expected_operator="COMPARE",
+        chains=[
+            "CMS | is_a | knowledge substrate | strength: 0.92",
+            "CMS | used_for | symbolic memory storage | strength: 0.90",
+            "CMS | has_property | mutable | strength: 0.80",
+            "CMS | enables | activation engine | strength: 0.88",
+            "EDEN | is_a | deterministic verifier | strength: 0.90",
+            "EDEN | used_for | proof tracing | strength: 0.87",
+            "EDEN | has_property | sealed | strength: 0.85",
+            "EDEN | contrasts_with | CMS | strength: 0.70",
+            "CMS | contrasts_with | EDEN | strength: 0.70",
+        ],
+        notes="Different roles — storage vs verification; verdict: different",
+    ),
+
     # ── FIND_GAPS ─────────────────────────────────────────────────────────────
     BenchCase(
         name="find_gaps_llm_independence",

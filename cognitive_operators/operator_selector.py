@@ -84,8 +84,8 @@ _INTENT_PATTERNS: dict[str, list[re.Pattern]] = {
 _LANE_COMPATIBLE: dict[str, set[str]] = {
     "identity":     {"RECALL_IDENTITY", "DEFINE", "ANSWER_UNCERTAIN", "REFUSE_PROTECTED"},
     "relationship": {"RECALL_RELATIONSHIP", "TRACE_CAUSE", "PLAN_NEXT", "ANSWER_UNCERTAIN"},
-    "project":      {"RECALL_PROJECT", "DEFINE", "EXPLAIN", "FIND_GAPS", "PLAN_NEXT",
-                     "CHECK_CONTRADICTION", "ASSESS_CONFIDENCE", "ANSWER_UNCERTAIN"},
+    "project":      {"RECALL_PROJECT", "DEFINE", "EXPLAIN", "COMPARE", "FIND_GAPS",
+                     "PLAN_NEXT", "CHECK_CONTRADICTION", "ASSESS_CONFIDENCE", "ANSWER_UNCERTAIN"},
     "knowledge":    {"DEFINE", "EXPLAIN", "COMPARE", "TRACE_CAUSE", "CHECK_CONTRADICTION",
                      "FIND_GAPS", "PLAN_NEXT", "ASSESS_CONFIDENCE", "ANSWER_UNCERTAIN"},
 }
