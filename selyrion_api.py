@@ -100,12 +100,29 @@ _langcog_voice = None
 try:
     from language_cognition.pipeline import run_language_cognition, rewrite_instruction
     from language_cognition.semantic_realizer import load_voice_profile as _load_voice
+    from language_cognition.dialogue_memory import DialogueMemory
     _langcog_ok = True
     print("[language_cognition] loaded OK")
 except Exception as _lc_exc:
     print(f"[language_cognition] unavailable: {_lc_exc}")
     run_language_cognition = None
     rewrite_instruction = None
+    DialogueMemory = None  # type: ignore
+
+# ── Dialogue Memory session store ─────────────────────────────────────────────
+# Ephemeral per-conversation memory: corrections → invariants, repair tracking.
+# Keyed by conversation_id. Max 100 live sessions (FIFO eviction).
+
+_dialogue_sessions: dict[str, object] = {}
+_MAX_DIALOGUE_SESSIONS = 100
+
+def _get_dialogue_session(conversation_id: str | None) -> object:
+    key = conversation_id or "_default"
+    if key not in _dialogue_sessions:
+        if len(_dialogue_sessions) >= _MAX_DIALOGUE_SESSIONS:
+            del _dialogue_sessions[next(iter(_dialogue_sessions))]
+        _dialogue_sessions[key] = DialogueMemory() if DialogueMemory else None
+    return _dialogue_sessions[key]
 
 # ── EDEN bootstrap (optional — graceful if missing deps) ──────────────────────
 
@@ -762,6 +779,10 @@ async def chat(req: ChatRequest, x_admin_token: Optional[str] = Header(default=N
         (m.content for m in reversed(req.messages) if m.role == "user"), ""
     )
 
+    # ── Dialogue memory ───────────────────────────────────────────────────────
+    dm = _get_dialogue_session(req.conversation_id)
+    _dm_user_turn = dm.record_user_turn(last_user) if dm else None
+
     # Security guard — bypassed for admin
     if not is_admin and _security_guard(last_user):
         async def blocked_stream():
@@ -786,6 +807,7 @@ async def chat(req: ChatRequest, x_admin_token: Optional[str] = Header(default=N
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     # ── Route memory ──────────────────────────────────────────────────────────
+    _dm_sa = ""  # speech act for dialogue memory assistant turn recording
     loop = asyncio.get_event_loop()
     packet = await loop.run_in_executor(
         None, lambda: _mem_router.route(last_user, auth_level)
@@ -838,15 +860,26 @@ async def chat(req: ChatRequest, x_admin_token: Optional[str] = Header(default=N
         _lc_result = None
         if _langcog_ok and _cog_pipeline_ok and 'plan' in dir():
             try:
+                _lc_history = dm.as_history()[:-1] if dm else [{"role": m.role, "content": m.content} for m in req.messages[:-1]]
                 _lc_result = await loop.run_in_executor(
                     None,
                     lambda: run_language_cognition(
                         query=last_user,
                         response_plan=plan,
-                        history=[{"role": m.role, "content": m.content} for m in req.messages[:-1]],
+                        history=_lc_history,
                     )
                 )
                 cog_plan_display = _lc_result.text or cog_plan_display
+                # Update dialogue memory with pragmatic reading
+                if dm and _dm_user_turn and _lc_result.pragmatic_reading:
+                    pr = _lc_result.pragmatic_reading
+                    _dm_user_turn.speech_act = _lc_result.speech_act
+                    _dm_user_turn.pragmatic_act = pr.pragmatic_act
+                    _dm_user_turn.inferred_intent = pr.inferred_intent
+                    _dm_user_turn.repair_needed = pr.repair_needed
+                    _dm_user_turn.emotional_signal = pr.emotional_signal
+                    if pr.repair_needed and _lc_result.speech_act in ("CORRECT", "DIAGNOSE"):
+                        dm.add_correction(last_user)
             except Exception as _lc_e:
                 print(f"[langcog] personal path error: {_lc_e}")
 
@@ -867,14 +900,16 @@ async def chat(req: ChatRequest, x_admin_token: Optional[str] = Header(default=N
                                      headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
         # substrate_first: Language Cognition structured substrate → Qwen rewrite
+        _dm_invariants = dm.get_invariants_text() if dm else ""
+        _dm_sa = getattr(_lc_result, 'speech_act', '') if _lc_result else ''
         if _lc_result and _langcog_ok:
-            # Give Qwen the structured utterance plan — speech act + meaning units + constraints
             lc_substrate = rewrite_instruction(_lc_result)
             system = base_system + "\n\n" + lc_substrate
         else:
-            # Fallback: old raw substrate
             system = (base_system + "\n\n" + context_block + "\n\n" +
                       _REWRITE_ONLY_INSTRUCTION.format(substrate=substrate))
+        if _dm_invariants:
+            system += "\n\nCONVERSATION INVARIANTS (established this session — do not contradict):\n" + _dm_invariants
         use_articulator = False
 
     else:
@@ -904,15 +939,25 @@ async def chat(req: ChatRequest, x_admin_token: Optional[str] = Header(default=N
         _lc_result_k = None
         if _langcog_ok and _cog_pipeline_ok and 'plan' in dir():
             try:
+                _lc_history_k = dm.as_history()[:-1] if dm else [{"role": m.role, "content": m.content} for m in req.messages[:-1]]
                 _lc_result_k = await loop.run_in_executor(
                     None,
                     lambda: run_language_cognition(
                         query=last_user,
                         response_plan=plan,
-                        history=[{"role": m.role, "content": m.content} for m in req.messages[:-1]],
+                        history=_lc_history_k,
                     )
                 )
                 cog_plan_display = _lc_result_k.text or cog_plan_display
+                if dm and _dm_user_turn and _lc_result_k.pragmatic_reading:
+                    pr = _lc_result_k.pragmatic_reading
+                    _dm_user_turn.speech_act = _lc_result_k.speech_act
+                    _dm_user_turn.pragmatic_act = pr.pragmatic_act
+                    _dm_user_turn.inferred_intent = pr.inferred_intent
+                    _dm_user_turn.repair_needed = pr.repair_needed
+                    _dm_user_turn.emotional_signal = pr.emotional_signal
+                    if pr.repair_needed and _lc_result_k.speech_act in ("CORRECT", "DIAGNOSE"):
+                        dm.add_correction(last_user)
             except Exception as _lc_ke:
                 print(f"[langcog] knowledge path error: {_lc_ke}")
 
@@ -934,6 +979,7 @@ async def chat(req: ChatRequest, x_admin_token: Optional[str] = Header(default=N
                                      headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
         # Language Cognition structured substrate → Qwen
+        _dm_sa = getattr(_lc_result_k, 'speech_act', '') if _lc_result_k else ''
         if _lc_result_k and _langcog_ok:
             system = base_system + "\n\n" + rewrite_instruction(_lc_result_k)
         else:
@@ -943,6 +989,9 @@ async def chat(req: ChatRequest, x_admin_token: Optional[str] = Header(default=N
             if cog_context:
                 system += f"\n\n[COGNITIVE ANALYSIS — {getattr(plan, 'speech_act', '')}] " \
                           f"(confidence={getattr(plan, 'confidence', 0):.2f}):\n{cog_context}"
+        _dm_invariants_k = dm.get_invariants_text() if dm else ""
+        if _dm_invariants_k:
+            system += "\n\nCONVERSATION INVARIANTS (established this session — do not contradict):\n" + _dm_invariants_k
 
         if SEL_GUI_MODE == "langeng_first" and packet.knowledge_prose:
             # Return LangEng prose directly, skip Qwen
@@ -987,6 +1036,10 @@ async def chat(req: ChatRequest, x_admin_token: Optional[str] = Header(default=N
                         full_response = articulated or full_response
                     except Exception as exc:
                         print(f"[articulator] error: {exc}")
+
+                # Record assistant turn in dialogue memory
+                if dm and full_response:
+                    dm.record_assistant_turn(full_response, speech_act=_dm_sa)
 
                 # Stream the final response
                 if full_response:
@@ -1133,6 +1186,7 @@ async def health():
         "memory_router":      _mem_router._router_instance is not None,
         "cognitive_operators": _cog_pipeline_ok,
         "language_cognition":  _langcog_ok,
+        "dialogue_sessions":   len(_dialogue_sessions),
         "substrate_only_mode": SUBSTRATE_ONLY,
         "qwen_only_mode":     QWEN_ONLY,
         "gui_mode":           SEL_GUI_MODE,

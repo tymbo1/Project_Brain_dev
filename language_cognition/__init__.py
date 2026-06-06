@@ -24,7 +24,10 @@ from .speech_acts import select_speech_act, rank_speech_acts, SPEECH_ACTS
 from .utterance_planner import UtterancePlan, MeaningUnit, plan_utterance
 from .repair_engine import RepairEngine
 from .semantic_realizer import SemanticRealizer, load_voice_profile
-from .pipeline import run_language_cognition, LanguageCognitionResult
+from .pragmatics import PragmaticReading, PragmaticRule, PragmaticsEngine, interpret as pragmatic_interpret
+from .dialogue_memory import DialogueMemory, DialogueTurn, ActiveInvariant
+from .lc_db import init_db as lc_init_db, ensure_db as lc_ensure_db
+from .pipeline import run_language_cognition, LanguageCognitionResult, rewrite_instruction
 
 __all__ = [
     "DiscourseState", "infer_discourse_state",
@@ -32,5 +35,8 @@ __all__ = [
     "UtterancePlan", "MeaningUnit", "plan_utterance",
     "RepairEngine",
     "SemanticRealizer", "load_voice_profile",
-    "run_language_cognition", "LanguageCognitionResult",
+    "PragmaticReading", "PragmaticRule", "PragmaticsEngine", "pragmatic_interpret",
+    "DialogueMemory", "DialogueTurn", "ActiveInvariant",
+    "lc_init_db", "lc_ensure_db",
+    "run_language_cognition", "LanguageCognitionResult", "rewrite_instruction",
 ]

@@ -33,6 +33,7 @@ from .speech_acts      import select_speech_act, rank_speech_acts
 from .utterance_planner import UtterancePlan, plan_utterance
 from .repair_engine    import RepairEngine
 from .semantic_realizer import SemanticRealizer, VoiceProfile, load_voice_profile
+from .pragmatics       import PragmaticReading, interpret as pragmatic_interpret
 
 _repair_engine = RepairEngine()
 
@@ -53,16 +54,22 @@ class LanguageCognitionResult:
     discourse_state: DiscourseState
     speech_act:     str
     confidence:     float
+    pragmatic_reading: PragmaticReading | None = None
 
     def as_dict(self) -> dict:
+        pr = self.pragmatic_reading
         return {
-            "speech_act":     self.speech_act,
+            "speech_act":      self.speech_act,
             "discourse_state": self.discourse_state.as_dict(),
-            "confidence":     round(self.confidence, 3),
-            "text_length":    len(self.text),
-            "meaning_units":  len(self.plan.meaning_units),
-            "stance":         self.plan.stance,
-            "next_turn":      self.plan.next_turn_affordance,
+            "confidence":      round(self.confidence, 3),
+            "text_length":     len(self.text),
+            "meaning_units":   len(self.plan.meaning_units),
+            "stance":          self.plan.stance,
+            "next_turn":       self.plan.next_turn_affordance,
+            "pragmatic_act":   pr.pragmatic_act if pr else None,
+            "inferred_intent": pr.inferred_intent if pr else None,
+            "emotional_signal":pr.emotional_signal if pr else None,
+            "repair_needed":   pr.repair_needed if pr else False,
         }
 
     def substrate_for_qwen(self) -> str:
@@ -97,8 +104,40 @@ def run_language_cognition(
         operator_output=op_output,
     )
 
+    # ── 1b. Pragmatic Inference ───────────────────────────────────────────────
+    prior_text = ""
+    if history:
+        for turn in reversed(history):
+            if turn.get("role") == "assistant":
+                prior_text = turn.get("content", "")
+                break
+    pragma = pragmatic_interpret(query, state, prior_assistant_text=prior_text)
+
+    # Pragmatic inference can override discourse state constraints
+    if pragma.must_not:
+        state.must_not = list(set(state.must_not + pragma.must_not))
+    if pragma.repair_needed:
+        state.user_act = state.user_act  # preserve but signal repair in plan
+
     # ── 2. Speech Act Selection ───────────────────────────────────────────────
-    speech_act = select_speech_act(query, response_plan, state)
+    # Pragmatics can force or suggest the speech act.
+    # _FORCE_MAP covers high-priority overrides (DIAGNOSE, CORRECT, REFUSE, etc.)
+    # For lower-priority pragmatic acts (RECALL, DEFINE, ASSERT, PLAN, AGREE),
+    # we use the pragmatic_act as a strong hint if the intent is specific.
+    _KNOWN_ACTS = {"ASSERT", "DEFINE", "CLARIFY", "REFUSE", "WARN", "REASSURE",
+                   "RECALL", "CORRECT", "ASK_FOLLOWUP", "SUMMARIZE", "PLAN",
+                   "AGREE", "DISAGREE", "MARK_UNCERTAINTY", "DIAGNOSE"}
+    _VAGUE_INTENTS = {"understand", "ambiguous_reference", ""}
+
+    forced_act = pragma.overrides_speech_act()
+    if forced_act:
+        speech_act = forced_act
+    elif (pragma.pragmatic_act in _KNOWN_ACTS
+          and pragma.inferred_intent not in _VAGUE_INTENTS):
+        # Pragmatic inference is specific — trust it over scoring
+        speech_act = pragma.pragmatic_act
+    else:
+        speech_act = select_speech_act(query, response_plan, state)
 
     # ── 3. Utterance Planning ─────────────────────────────────────────────────
     uplan = plan_utterance(speech_act, response_plan, state)
@@ -116,6 +155,7 @@ def run_language_cognition(
         discourse_state=state,
         speech_act=speech_act,
         confidence=getattr(response_plan, "confidence", 0.0),
+        pragmatic_reading=pragma,
     )
 
 
