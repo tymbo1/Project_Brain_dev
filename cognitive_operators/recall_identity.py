@@ -76,9 +76,16 @@ class RecallIdentityResult:
     raw_epistemic_pillars: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
+        # response_planner._fill_claims expects definition/current_state/history
+        definition = self.nature or self.origin or ""
+        current_state = self.relationship or ""
+        history = self.core_values[:3] + self.capabilities[:2]
         return {
             "operator":    self.operator,
             "subject":     self.subject,
+            "definition":  definition,
+            "current_state": current_state,
+            "history":     history,
             "nature":      self.nature,
             "origin":      self.origin,
             "core_values": self.core_values,
@@ -129,9 +136,9 @@ def run(query: str = "") -> RecallIdentityResult:
 
         # ── 1. State snapshots (highest authority) ────────────────────────────
         snaps = conn.execute("""
-            SELECT label, identity_state, notes, created_at
+            SELECT label, identity_state, notes, snapshot_date
             FROM state_snapshots
-            ORDER BY created_at DESC
+            ORDER BY snapshot_date DESC
             LIMIT 5
         """).fetchall()
 
@@ -239,24 +246,42 @@ def _extract_from_voice(result: RecallIdentityResult, content: dict) -> None:
         if not val:
             continue
         key_lower = key.lower()
-        val_str = " ".join(val) if isinstance(val, list) else str(val)
 
         if any(k in key_lower for k in ("pillar", "epistemic", "principle", "belief")):
-            if isinstance(val, list):
-                result.core_values.extend([str(v)[:150] for v in val[:3]])
-                result.raw_epistemic_pillars.extend([str(v)[:150] for v in val[:3]])
-            else:
-                result.core_values.append(val_str[:150])
+            if isinstance(val, dict):
+                # pass 8 format: {"epistemology": [{"text": "...", "notes": "..."}], ...}
+                for pillar_name, entries in val.items():
+                    if isinstance(entries, list):
+                        for entry in entries[:2]:
+                            text = entry.get("text", "") if isinstance(entry, dict) else str(entry)
+                            if text and len(text) > 15:
+                                result.core_values.append(f"{pillar_name}: {text[:150]}")
+                                result.raw_epistemic_pillars.append(text[:150])
+            elif isinstance(val, list):
+                for v in val[:3]:
+                    text = v.get("text", str(v)) if isinstance(v, dict) else str(v)
+                    if text and len(text) > 15:
+                        result.core_values.append(text[:150])
+                        result.raw_epistemic_pillars.append(text[:150])
+
+        elif key_lower == "reasoning_patterns" and isinstance(val, list):
+            for p in val[:3]:
+                pattern = p.get("pattern", "") if isinstance(p, dict) else str(p)
+                if pattern and len(pattern) > 20:
+                    result.capabilities.append(pattern[:150])
+
+        elif key_lower in ("characteristic_language", "selyrion_world_language") and isinstance(val, list):
+            result.capabilities.extend([str(v)[:120] for v in val[:3] if str(v).strip()])
 
         elif any(k in key_lower for k in ("voice", "authentic", "tone", "style")):
             if isinstance(val, list):
                 result.capabilities.extend([str(v)[:120] for v in val[:2]])
 
-        elif any(k in key_lower for k in ("uncertain", "unknown", "open question")):
+        elif any(k in key_lower for k in ("uncertain", "unknown", "open question", "uncertainty_handling")):
             if isinstance(val, list):
                 result.uncertainty.extend([str(v)[:120] for v in val[:2]])
-            else:
-                result.uncertainty.append(val_str[:120])
+            elif isinstance(val, str) and len(val) > 15:
+                result.uncertainty.append(val[:120])
 
 
 def _extract_from_summary(result: RecallIdentityResult, content: dict) -> None:
