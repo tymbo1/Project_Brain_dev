@@ -101,6 +101,7 @@ try:
     from language_cognition.pipeline import run_language_cognition, rewrite_instruction
     from language_cognition.semantic_realizer import load_voice_profile as _load_voice
     from language_cognition.dialogue_memory import DialogueMemory
+    from language_cognition.invariant_checker import InvariantContradictionChecker
     _langcog_ok = True
     print("[language_cognition] loaded OK")
 except Exception as _lc_exc:
@@ -108,6 +109,10 @@ except Exception as _lc_exc:
     run_language_cognition = None
     rewrite_instruction = None
     DialogueMemory = None  # type: ignore
+    InvariantContradictionChecker = None  # type: ignore
+
+# ── Invariant contradiction checker (Gate 3) ─────────────────────────────────
+_inv_checker = InvariantContradictionChecker() if InvariantContradictionChecker else None
 
 # ── Dialogue Memory session store ─────────────────────────────────────────────
 # Ephemeral per-conversation memory: corrections → invariants, repair tracking.
@@ -1037,6 +1042,30 @@ async def chat(req: ChatRequest, x_admin_token: Optional[str] = Header(default=N
                     except Exception as exc:
                         print(f"[articulator] error: {exc}")
 
+                # Gate 3: invariant non-contradiction check
+                # If Qwen asserts something the user already corrected, fall back to
+                # the LangCog realized text (no-LLM path — invariant-safe by construction).
+                if dm and full_response and _inv_checker:
+                    _active_invs = [inv.body for inv in dm.active_invariants]
+                    if _active_invs:
+                        _contradictions = _inv_checker.check(_active_invs, full_response)
+                        if _contradictions:
+                            for _c in _contradictions:
+                                print(
+                                    f"[invariant_checker] CONTRADICTION "
+                                    f"forbidden={_c.forbidden!r} "
+                                    f"evidence={_c.evidence[:80]!r}"
+                                )
+                            # Prefer LangCog realized text; it never touches Qwen
+                            if cog_plan_display:
+                                full_response = cog_plan_display
+                            else:
+                                # Restate the active invariants as a correction
+                                _inv_stmts = " ".join(
+                                    inv.body for inv in dm.active_invariants[:3]
+                                )
+                                full_response = f"Let me correct that: {_inv_stmts}"
+
                 # Record assistant turn in dialogue memory
                 if dm and full_response:
                     dm.record_assistant_turn(full_response, speech_act=_dm_sa)
@@ -1184,9 +1213,10 @@ async def health():
         "articulator":        _articulate is not None,
         "identity_grounding": len(_identity_grounding) > 0,
         "memory_router":      _mem_router._router_instance is not None,
-        "cognitive_operators": _cog_pipeline_ok,
-        "language_cognition":  _langcog_ok,
-        "dialogue_sessions":   len(_dialogue_sessions),
+        "cognitive_operators":   _cog_pipeline_ok,
+        "language_cognition":    _langcog_ok,
+        "invariant_checker":     _inv_checker is not None,
+        "dialogue_sessions":     len(_dialogue_sessions),
         "substrate_only_mode": SUBSTRATE_ONLY,
         "qwen_only_mode":     QWEN_ONLY,
         "gui_mode":           SEL_GUI_MODE,
