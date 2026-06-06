@@ -149,7 +149,10 @@ def run_benchmark(
     try:
         from inference.activation_engine import ActivationEngine  # type: ignore
         _ae = ActivationEngine()
-        from inference import langeng_bridge  # type: ignore
+        try:
+            import langeng_bridge  # type: ignore  (lives at project root, not inference/)
+        except ImportError:
+            from inference import langeng_bridge  # type: ignore
         _chains_to_prose = langeng_bridge.chains_to_prose if hasattr(langeng_bridge, "chains_to_prose") else None
         _router.init_router(
             story_db=Path.home() / "selyrionstory.db",

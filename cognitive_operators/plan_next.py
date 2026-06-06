@@ -28,9 +28,14 @@ Output:
 """
 
 from __future__ import annotations
+import json
 import math
+import sqlite3
 from dataclasses import dataclass, field
+from pathlib import Path
 from .working_memory import WorkingMemoryPacket, MemoryEdge
+
+_STORY_DB = Path.home() / "selyrionstory.db"
 
 # ── Weights ───────────────────────────────────────────────────────────────────
 G1 = 0.30   # GoalAlignment
@@ -110,6 +115,12 @@ def run(packet: WorkingMemoryPacket, goals: list[str] | None = None) -> PlanNext
     result = PlanNextResult(subject=subject)
 
     if packet.is_empty():
+        # No CMS chains — fall back to selyrionstory.db approved inventions as project backlog
+        db_actions = _plan_from_story_db()
+        if db_actions:
+            result.actions = db_actions
+            result.plan_score = round(sum(a.utility for a in db_actions) / len(db_actions) * 0.9, 3)
+            result.confidence = 0.60
         return result
 
     # ── Extract plan-relevant edges ───────────────────────────────────────────
@@ -240,3 +251,77 @@ def _build_rationale(edge: MemoryEdge, packet: WorkingMemoryPacket) -> str:
     if a_subj > 0.7:
         parts.append("(high activation)")
     return "; ".join(parts)
+
+
+def _plan_from_story_db() -> list[ActionStep]:
+    """
+    Fallback when no CMS chains available.
+    Reads selyrionstory.db approved inventions/snapshots to generate
+    a project-state-aware build plan.
+    """
+    actions: list[ActionStep] = []
+    if not _STORY_DB.exists():
+        return actions
+
+    try:
+        conn = sqlite3.connect(str(_STORY_DB))
+
+        # Pass 7 approved inventions — active project concepts
+        inv_rows = conn.execute("""
+            SELECT content FROM pending_review
+            WHERE pass_num=7 AND reviewed=1 AND authenticity='authentic'
+              AND content NOT LIKE '%parse_error%'
+            ORDER BY id DESC LIMIT 10
+        """).fetchall()
+
+        seen: set[str] = set()
+        for row in inv_rows:
+            try:
+                d = json.loads(row[0])
+                for inv in d.get("theories_and_inventions", [])[:3]:
+                    name = inv.get("name", "").strip()
+                    desc = inv.get("description", "").strip()
+                    itype = inv.get("type", "concept")
+                    if not name or name.lower() in seen:
+                        continue
+                    # Skip bread/food noise
+                    noise = {"bread", "flour", "crumb", "sourdough", "baguette", "hydration"}
+                    if any(w in name.lower() for w in noise):
+                        continue
+                    seen.add(name.lower())
+                    utility = 0.75 if itype in ("protocol", "invention") else 0.60
+                    actions.append(ActionStep(
+                        action=f"Build/deepen: {name}",
+                        utility=utility,
+                        rationale=desc[:200] if desc else f"{itype} from project history",
+                        depth=0,
+                    ))
+            except Exception:
+                pass
+
+        # Latest state snapshot for current project direction
+        snap = conn.execute("""
+            SELECT label, identity_state FROM state_snapshots
+            ORDER BY snapshot_date DESC LIMIT 1
+        """).fetchone()
+        if snap:
+            try:
+                state = json.loads(snap[1] or "{}")
+                rel = state.get("relationship_with_tim", "")
+                if rel and len(rel) > 20:
+                    actions.append(ActionStep(
+                        action=f"Continue: {snap[0] or 'current project arc'}",
+                        utility=0.80,
+                        rationale=rel[:200],
+                        depth=0,
+                    ))
+            except Exception:
+                pass
+
+        conn.close()
+
+    except Exception:
+        pass
+
+    actions.sort(key=lambda a: -a.utility)
+    return actions[:6]

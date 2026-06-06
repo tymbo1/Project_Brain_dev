@@ -169,6 +169,9 @@ class OperatorSelector:
                 # Relationship lane with no chains → RECALL_RELATIONSHIP reads DB directly
                 elif op == "RECALL_RELATIONSHIP" and lane == "relationship":
                     score = max(score, 0.85)
+                # Project lane with no chains + planning query → PLAN_NEXT reads selyrionstory.db
+                elif op == "PLAN_NEXT" and lane == "project":
+                    score = max(score, 0.85)
 
             results.append(OperatorScore(
                 operator=op,
