@@ -208,7 +208,7 @@ _RULES: list[PragmaticRule] = [
 
     PragmaticRule(
         name="express_urgency",
-        priority=9,  # Above meta_architecture — urgency signal wins over structural discussion
+        priority=11,  # Above failure_report — "drop everything/urgent" is action, not diagnosis
         trigger_patterns=[
             re.compile(r'\b(urgent|asap|right now|immediately|need this now|need .+ fixed now|need it now|fix this now|prioritize|drop everything|focus on this)\b', re.I),
         ],
@@ -412,7 +412,7 @@ _RULES: list[PragmaticRule] = [
         trigger_patterns=[
             re.compile(r'^(and|also)\s+(the|what about|how about|what of|tell me about)\b', re.I),
             re.compile(r'^(what about|how about|and what about)\s+\w', re.I),
-            re.compile(r'^(so\s+)?(what|how|tell me)\s+(about|does|is)\s+\w', re.I),
+            re.compile(r'^so\s+(what|how|tell me)\s+(about|does|is)\s+\w', re.I),
             re.compile(r'^and\s+(that|this|it)\s+\w', re.I),
             re.compile(r'^and\s+before\s+(that|this|then)\b', re.I),
         ],
