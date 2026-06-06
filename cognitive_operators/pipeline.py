@@ -33,7 +33,7 @@ from __future__ import annotations
 from .working_memory    import build_packet, WorkingMemoryPacket
 from .operator_selector import select_operator, OperatorSelector
 from .response_planner  import ResponsePlanner, ResponsePlan, build_plan
-from . import define, explain, compare, find_gaps, recall_project, recall_identity, plan_next, check_contradiction, assess_confidence
+from . import define, explain, compare, find_gaps, trace_cause, recall_project, recall_identity, plan_next, check_contradiction, assess_confidence
 
 _selector = OperatorSelector()
 _planner  = ResponsePlanner()
@@ -155,7 +155,9 @@ def _run_operator(
     elif op_name == "COMPARE":
         return compare.run(packet).as_dict()
 
+    elif op_name == "TRACE_CAUSE":
+        return trace_cause.run(packet).as_dict()
+
     else:
-        # TRACE_CAUSE — stub until built
         # Fall through to DEFINE as best available approximation
         return define.run(packet).as_dict()

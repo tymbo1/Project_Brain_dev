@@ -150,6 +150,50 @@ BENCHMARK_CASES: list[BenchCase] = [
         notes="Sparse two-hop chain — should still produce an explanation with uncertainty",
     ),
 
+    # ── TRACE_CAUSE ───────────────────────────────────────────────────────────
+    BenchCase(
+        name="trace_cause_glucose",
+        query="What caused glucose to be produced?",
+        lane="knowledge",
+        expected_operator="TRACE_CAUSE",
+        chains=[
+            "photosynthesis | requires | sunlight | strength: 0.90",
+            "sunlight | enables | light reactions | strength: 0.88",
+            "light reactions | produces | ATP | strength: 0.85",
+            "ATP | enables | calvin cycle | strength: 0.87",
+            "calvin cycle | produces | glucose | strength: 0.91",
+            "carbon dioxide | requires | calvin cycle | strength: 0.80",
+        ],
+        notes="Effect=glucose; trace backward: calvin cycle → ATP → light reactions → sunlight",
+    ),
+
+    BenchCase(
+        name="trace_cause_stopiteration",
+        query="Why did StopIteration get raised?",
+        lane="knowledge",
+        expected_operator="TRACE_CAUSE",
+        chains=[
+            "generator exhaustion | causes | StopIteration | strength: 0.93",
+            "all yields consumed | leads_to | generator exhaustion | strength: 0.88",
+            "repeated next() calls | causes | all yields consumed | strength: 0.85",
+            "iteration loop | triggers | repeated next() calls | strength: 0.80",
+        ],
+        notes="Root cause=iteration loop; chain: iteration loop → next() → exhaustion → StopIteration",
+    ),
+
+    BenchCase(
+        name="trace_cause_sparse",
+        query="What caused the memory router to be built?",
+        lane="project",
+        expected_operator="TRACE_CAUSE",
+        chains=[
+            "LLM dependence | causes | identity confusion | strength: 0.80",
+            "identity confusion | leads_to | need for memory router | strength: 0.78",
+            "need for memory router | causes | memory router build | strength: 0.85",
+        ],
+        notes="Short chain; root cause=LLM dependence",
+    ),
+
     # ── COMPARE ───────────────────────────────────────────────────────────────
     BenchCase(
         name="compare_generator_vs_list",

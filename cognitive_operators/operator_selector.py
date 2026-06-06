@@ -58,7 +58,9 @@ _INTENT_PATTERNS: dict[str, list[re.Pattern]] = {
         re.compile(r'\b(status of|update on|tell me about|what is .+(project|system|work))\b', re.I),
     ],
     "TRACE_CAUSE": [
-        re.compile(r'\b(caused by|why did|what led to|trace|root cause|origin of)\b', re.I),
+        re.compile(r'\b(caused by|what led to|trace|root cause|origin of)\b', re.I),
+        re.compile(r'\b(what caused|why was|why were|what triggered|what started)\b', re.I),
+        re.compile(r'\b(why did|how did .+ happen|what brought about|source of)\b', re.I),
     ],
     "FIND_GAPS": [
         re.compile(r'\b(what.s missing|what is missing|gaps in|what are the gaps)\b', re.I),

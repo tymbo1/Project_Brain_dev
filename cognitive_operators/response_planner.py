@@ -213,6 +213,13 @@ class ResponsePlanner:
             )
             plan.claims.extend(out.get("supporting_evidence", [])[:2])
 
+        elif op == "TRACE_CAUSE":
+            if out.get("root_causes"):
+                plan.claims.append(
+                    "Root causes: " + ", ".join(out["root_causes"][:3])
+                )
+            plan.claims.extend(out.get("causal_chain", [])[:4])
+
         elif op == "FIND_GAPS":
             for g in (out.get("missing") or [])[:4]:
                 if isinstance(g, dict):
