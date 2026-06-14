@@ -21,6 +21,7 @@ Cloudflare Tunnel:
 import asyncio
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -84,6 +85,101 @@ sys.path.insert(0, str(ROOT / "inference"))
 
 import memory_router as _mem_router
 
+# ── Shadow cognition: read-only causal grounding from explanation_surface ─────
+_shadow_ok = False
+try:
+    from explanation_surface import build_why as _build_why
+    _shadow_ok = True
+    print("[shadow_cognition] explanation_surface loaded OK")
+except Exception as _shadow_exc:
+    print(f"[shadow_cognition] unavailable: {_shadow_exc}")
+    _build_why = None
+
+_spine_ok = False
+try:
+    from cognitive_spine import (build_cognitive_context as _spine_context,
+                                 causal_explain as _spine_why,
+                                 get_state as _spine_state)
+    _spine_ok = True
+    print("[cognitive_spine] loaded OK")
+except Exception as _spine_exc:
+    print(f"[cognitive_spine] unavailable: {_spine_exc}")
+    _spine_context = None
+    _spine_why = None
+    _spine_state = None
+
+_SHADOW_DB_PATH = str(Path.home() / "resonance_v11.db")
+_SHADOW_STOPWORDS = frozenset({
+    "the","and","for","that","this","with","you","your","are","was","did","has",
+    "have","can","could","would","should","tell","talk","know","what","where",
+    "how","why","when","who","does","there","they","them","our","its","into",
+    "from","than","then","but","not","now","one","two","also","just","yes",
+    "yeah","please","explain","describe","define","versus","or","about","like",
+    "want","need","help","make","made","being","been","over","under","same",
+    "between","much","many","very","really","ever","still","again",
+    # 2-char fillers (kept so genuine 2-char content like 'ai','ml','os' survives)
+    "of","to","in","by","is","it","on","an","as","at","be","do","go","if",
+    "me","my","no","so","up","us","we",
+})
+
+def _shadow_cognition(query: str) -> str:
+    """Read-only causal context. Best-effort. NEVER throws.
+
+    Seed selection: prefer the first content noun (subject is usually leftmost
+    in English), with relation_count as a gentle tiebreaker. Bigrams take
+    priority over their constituent unigrams when both match.
+    """
+    if not _shadow_ok or not query:
+        return ""
+    try:
+        import sqlite3, math
+        tokens = re.findall(r"[a-z][a-z'-]+", query.lower())
+        terms = [t for t in tokens if t not in _SHADOW_STOPWORDS]
+        if not terms:
+            return ""
+        # Bigrams first (more specific), then unigrams. Order = positional rank.
+        unigrams = list(dict.fromkeys(terms))
+        bigrams = [f"{terms[i]} {terms[i+1]}" for i in range(len(terms) - 1)]
+        candidates = bigrams + unigrams
+        if len(candidates) > 32:
+            candidates = candidates[:32]
+        pos_index = {c: i for i, c in enumerate(candidates)}
+        # Hub nodes (>50K relations) are usually too generic to be a useful seed.
+        # Sparse nodes (<5 relations) likely have nothing to say causally.
+        MIN_RC, HUB_RC = 5, 50_000
+        conn = sqlite3.connect(_SHADOW_DB_PATH)
+        try:
+            placeholders = ",".join("?" * len(candidates))
+            rows = conn.execute(
+                f"SELECT id, canonical, relation_count FROM anchors "
+                f"WHERE canonical IN ({placeholders})",
+                candidates,
+            ).fetchall()
+            if not rows:
+                return ""
+            # Sort by leftmost position; prefer rows in the "useful" rc band first,
+            # then by position. Walk the list and take the first seed that has
+            # actual causal lines — some anchors only have weak/associative edges.
+            rows.sort(key=lambda r: pos_index.get(r[1], len(candidates)))
+            in_band = [r for r in rows if MIN_RC <= r[2] <= HUB_RC]
+            ordered = in_band + [r for r in rows if r not in in_band]
+            for aid, canon, _rc in ordered[:4]:
+                lines = _build_why(aid, canon, db=conn, max_lines=2)
+                if lines:
+                    return "\n".join(lines)
+            return ""
+        finally:
+            conn.close()
+    except Exception as _e:
+        print(f"[shadow:dbg] exception: {_e}")
+        return ""
+
+def _should_use_shadow(query: str) -> bool:
+    if not query:
+        return False
+    q = query.lower().strip()
+    return len(q.split()) >= 3 or "why" in q or "how" in q or "what" in q
+
 # ── Cognitive operator pipeline ───────────────────────────────────────────────
 _cog_pipeline_ok = False
 try:
@@ -102,6 +198,7 @@ try:
     from language_cognition.semantic_realizer import load_voice_profile as _load_voice
     from language_cognition.dialogue_memory import DialogueMemory
     from language_cognition.invariant_checker import InvariantContradictionChecker
+    from language_cognition.dialogue_focus import resolve_elliptic_query, write_focus_audit
     _langcog_ok = True
     print("[language_cognition] loaded OK")
 except Exception as _lc_exc:
@@ -110,6 +207,8 @@ except Exception as _lc_exc:
     rewrite_instruction = None
     DialogueMemory = None  # type: ignore
     InvariantContradictionChecker = None  # type: ignore
+    resolve_elliptic_query = None  # type: ignore
+    write_focus_audit = None  # type: ignore
 
 # ── Invariant contradiction checker (Gate 3) ─────────────────────────────────
 _inv_checker = InvariantContradictionChecker() if InvariantContradictionChecker else None
@@ -330,6 +429,17 @@ def _build_system_prompt() -> str:
     return _SYSTEM_PROMPT_BASE
 
 
+_TONE_DIRECTIVES = {
+    "stable":             "Speak with confidence. Take clear positions backed by substrate.",
+    "confused":           "Speak cautiously. Acknowledge uncertainty. Prefer 'evidence suggests' or 'this may indicate' over definitive claims.",
+    "learning":           "Speak with measured curiosity. Distinguish what is known from what is still being investigated.",
+    "under_investigated": "Speak modestly — substrate is sparse. Surface what little is known and what is missing.",
+}
+
+def _tone_directive(mode: str) -> str:
+    return _TONE_DIRECTIVES.get(mode, "")
+
+
 SYSTEM_PROMPT = _SYSTEM_PROMPT_BASE  # will be rebuilt after identity loads
 
 # ── App ───────────────────────────────────────────────────────────────────────
@@ -356,6 +466,10 @@ class ChatRequest(BaseModel):
     conversation_id: Optional[str] = None
     use_search: bool = False
     cms_context: Optional[str] = None
+    max_tokens: Optional[int] = None
+    model: Optional[str] = None   # per-request model override; falls back to OLLAMA_MODEL
+    qwen_only: Optional[bool] = None  # per-request bypass of cognitive stack (None = use QWEN_ONLY env)
+    pure_symbolic: Optional[bool] = None  # selyrion-only: no LLM, deterministic prose from CMS
 
 class EdenRequest(BaseModel):
     # EDEN is a verifier/stabilizer — not used in live chat.
@@ -450,7 +564,78 @@ _IDENTITY_TRIGGERS = {
     "remember when", "you told me", "you mentioned",
     "companion", "creator", "created you", "built you",
     "selyrion's", "your past", "your story",
+    # Selyrion's own architecture — must route to identity, not knowledge lane
+    "activation engine", "utterance planner", "decay parameter",
+    "langcog", "language cognition", "language cognition layer",
+    "dialogue memory", "invariant checker", "cognitive pipeline",
+    "cog pipeline", "substrate", "ssre", "cms", "resonance",
+    "response plan", "meaning unit", "speech act",
+    # meta-queries about this conversation / Selyrion's confidence
+    "confident about", "are you sure", "how sure",
+    "remember from this conversation", "from this conversation",
+    "from our conversation", "this conversation",
+    "what do you remember", "what have we covered",
 }
+
+_META_RECALL_RE = re.compile(
+    r"(most important|remember from this|from this conversation|from our conversation|"
+    r"recall from this|what did we cover|what have we covered|what we.ve covered|"
+    r"covered so far|can you summarize|summarize what|"
+    r"over this conversation|what did we discuss|what did we talk)",
+    re.IGNORECASE,
+)
+
+_META_CONFIDENCE_RE = re.compile(
+    r"(confident about( that)?|are you (sure|certain)|how (sure|confident|certain) are you|"
+    r"sure about that|certain about that|you sure about)",
+    re.IGNORECASE,
+)
+
+# Anaphora follow-ups: "how does THAT relate to X", "how does IT score", "why does IT matter"
+_ANAPHOR_RE = re.compile(
+    r"\b(that|it|this|those|they|its)\b.{0,40}\b"
+    r"(relate|connect|interact|differ|compare|score|work|matter|"
+    r"affect|influence|fit|change|apply|function|contribute)",
+    re.IGNORECASE,
+)
+
+# Identity denial: queries that mention chatbot/llm/gpt — must respond without using the word
+_IDENTITY_DENY_RE = re.compile(
+    r"\b(chatbot|language model|llm|gpt|chat\s*bot)\b",
+    re.IGNORECASE,
+)
+
+_DM_STOPWORDS = {
+    "the", "and", "for", "that", "this", "with", "you", "your", "what",
+    "are", "was", "did", "has", "have", "can", "could", "would", "about",
+    "how", "why", "does", "from", "just", "tell", "more",
+}
+
+def _dm_extract_topics(dm) -> list[str]:
+    """Extract notable topic words from DM conversation history."""
+    topics: list[str] = []
+    seen: set[str] = set()
+    for turn in dm.turns:
+        words = [w.lower().strip(".,!?") for w in turn.text.split() if len(w) > 4]
+        for w in words:
+            if w not in _DM_STOPWORDS and w not in seen:
+                seen.add(w)
+                topics.append(w)
+    return topics[:12]
+
+
+def _is_substrate_relevant(text: str, query: str) -> bool:
+    """True if the opening of the substrate text mentions at least one non-trivial query term.
+    Checks only the first 300 chars to avoid false positives from unrelated later entries."""
+    _stop = _DM_STOPWORDS | {"what", "does", "does", "that", "this", "relate", "why", "tell", "show", "explain"}
+    terms = {w.lower().strip(".,!?'\"") for w in query.split()
+             if len(w) > 3 and w.lower().strip(".,!?'\"") not in _stop}
+    if not terms:
+        return True
+    # Only check the opening to prevent irrelevant later entries from passing the gate
+    text_lower = text[:300].lower()
+    return any(t in text_lower for t in terms)
+
 
 def _classify_query(query: str) -> set:
     """
@@ -611,14 +796,18 @@ def _cms_context_for_chat(query: str) -> tuple[str, list, str | None]:
 
 # ── Chat endpoint ─────────────────────────────────────────────────────────────
 
-async def _stream_ollama(messages: list, system: str, bypass_output_guard: bool = False) -> AsyncIterator[str]:
+async def _stream_ollama(messages: list, system: str, bypass_output_guard: bool = False,
+                         max_tokens: int | None = None,
+                         model: str | None = None) -> AsyncIterator[str]:
     """Stream from local Ollama with output guard. All data stays on-machine."""
     payload = {
-        "model": OLLAMA_MODEL,
+        "model": model or OLLAMA_MODEL,
         "stream": True,
         "messages": [{"role": "system", "content": system}]
                    + [{"role": m.role, "content": m.content} for m in messages],
     }
+    if max_tokens:
+        payload["options"] = {"num_predict": max_tokens}
     accumulated = ""
     chunks = []
     async with httpx.AsyncClient(timeout=120) as client:
@@ -647,6 +836,44 @@ async def _stream_ollama(messages: list, system: str, bypass_output_guard: bool 
     for chunk in chunks:
         yield f"data: {json.dumps({'text': chunk})}\n\n"
         await asyncio.sleep(0)
+
+
+_SUBSTRATE_RAW_PATTERNS = (
+    "confidence: no_memory", "confidence: ", "category: _",
+    "shared: related_to", "↔", "similarity=0.", "anchor_id:",
+    "predicate:", "_linnarssonia_", "_kutorgina_",
+)
+
+# Patterns that discard the entire line without salvage attempt
+_SUBSTRATE_DISCARD_PATTERNS = (
+    "my substrate on this topic may not be populated",
+    "build/deepen:",
+    "planning context:",
+    "continue: initial identity",
+    "continue: build",
+    "i hold this with some uncertainty: my substrate",
+)
+
+def _sanitize_substrate(text: str) -> str:
+    """Strip raw CMS schema notation from personal lane substrate before display."""
+    if not text:
+        return text
+    lines = text.splitlines()
+    clean = []
+    for line in lines:
+        ll = line.lower()
+        # Hard discard: selyrionstory plan/goal entries are never meaningful substrate
+        if any(p in ll for p in _SUBSTRATE_DISCARD_PATTERNS):
+            continue
+        if any(p in ll for p in _SUBSTRATE_RAW_PATTERNS):
+            # Try to salvage the non-schema part of the line
+            parts = re.split(r"confidence:\s*no_memory\.?\s*", line, flags=re.IGNORECASE)
+            salvaged = " ".join(p.strip() for p in parts if p.strip() and len(p.strip()) > 10)
+            if salvaged:
+                clean.append(salvaged)
+        else:
+            clean.append(line)
+    return "\n".join(clean).strip()
 
 
 async def _stream_fallback(query: str) -> AsyncIterator[str]:
@@ -769,8 +996,21 @@ def _format_plan_for_display(plan) -> str:
         for c in plan.claims[:6]:
             lines.append(f"• {c}")
 
+    _RAW_DISPLAY_PATTERNS = (
+        "confidence:", "category:", "shared:", "related_to", "↔",
+        "similarity=", "predicate:", "anchor_id:", "no_memory",
+        "confidence level:", "_linnarssonia_", "_kutorgina_",
+    )
+    def _is_raw(s: str) -> bool:
+        sl = s.lower()
+        return any(p in sl for p in _RAW_DISPLAY_PATTERNS)
+
+    # filter raw schema from claims (else branch) and uncertainties
+    lines = [l for l in lines if not _is_raw(l)]
     if plan.uncertainties:
-        lines.append("\n[Uncertainty: " + "; ".join(str(u)[:100] for u in plan.uncertainties[:2]) + "]")
+        clean_u = [str(u) for u in plan.uncertainties[:2] if not _is_raw(str(u))]
+        if clean_u:
+            lines.append("\n[I hold this with some uncertainty: " + "; ".join(u[:100] for u in clean_u) + "]")
 
     return "\n".join(lines).strip()
 
@@ -786,6 +1026,40 @@ async def chat(req: ChatRequest, x_admin_token: Optional[str] = Header(default=N
 
     # ── Dialogue memory ───────────────────────────────────────────────────────
     dm = _get_dialogue_session(req.conversation_id)
+
+    # ── Ellipsis / anaphora focus resolution ─────────────────────────────────
+    _resolved_query = last_user
+    _ellipsis_resolved = False
+    _ellipsis_focus_term: str | None = None
+    _ellipsis_target_domain: str | None = None
+    if dm and dm.focus_state and resolve_elliptic_query:
+        try:
+            _rq = resolve_elliptic_query(last_user, dm.focus_state)
+            print(f"[focus] q={last_user!r} focus_term={dm.focus_state.current_focus_term!r} "
+                  f"resolved={_rq.was_resolved} rq={_rq.resolved_query!r}")
+            if _rq.was_resolved:
+                _resolved_query = _rq.resolved_query
+                _ellipsis_resolved = True
+                _ellipsis_focus_term = _rq.focus_term
+                _ellipsis_target_domain = _rq.target_domain
+                if write_focus_audit:
+                    write_focus_audit(_rq)
+        except Exception as _fe:
+            print(f"[focus] error: {_fe}")
+
+    # ── Eager focus-term extraction from resolved query ───────────────────────
+    # Runs unconditionally so focus state stays current even when no substrate found.
+    if dm and dm.focus_state:
+        try:
+            from language_cognition.dialogue_focus import _DEFINIENDUM_RE as _dfre
+            _dfm = _dfre.search(_resolved_query)
+            if _dfm:
+                _df_cand = (_dfm.group(1) or _dfm.group(2) or "").strip().lower().rstrip("s")
+                if len(_df_cand) > 2:
+                    dm.focus_state.current_focus_term = _df_cand
+        except Exception:
+            pass
+
     _dm_user_turn = dm.record_user_turn(last_user) if dm else None
 
     # Security guard — bypassed for admin
@@ -797,12 +1071,13 @@ async def chat(req: ChatRequest, x_admin_token: Optional[str] = Header(default=N
                                  headers={"Cache-Control": "no-cache"})
 
     # ── Qwen-only mode: skip all memory and cognitive operators ─────────────────
-    if QWEN_ONLY:
+    if (req.qwen_only if req.qwen_only is not None else QWEN_ONLY):
         base_system = _build_system_prompt()
         async def qwen_only_stream():
             if _ollama_ok:
                 async for chunk in _stream_ollama(req.messages, base_system,
-                                                  bypass_output_guard=is_admin):
+                                                  bypass_output_guard=is_admin,
+                                                  model=req.model):
                     yield chunk
             else:
                 async for chunk in _stream_fallback(last_user):
@@ -815,11 +1090,71 @@ async def chat(req: ChatRequest, x_admin_token: Optional[str] = Header(default=N
     _dm_sa = ""  # speech act for dialogue memory assistant turn recording
     loop = asyncio.get_event_loop()
     packet = await loop.run_in_executor(
-        None, lambda: _mem_router.route(last_user, auth_level)
+        None, lambda: _mem_router.route(_resolved_query, auth_level)
     )
+
+    # ── Pure-symbolic mode: zero LLM. Deterministic prose from CMS only. ──────
+    if req.pure_symbolic:
+        text = ""
+        if packet.is_personal() and packet.substrate_text:
+            text = _sanitize_substrate(packet.substrate_text)
+        elif packet.knowledge_chains and _chains_to_prose:
+            try:
+                text = _chains_to_prose(_resolved_query or last_user,
+                                        packet.knowledge_chains) or ""
+            except Exception as _e:
+                print(f"[pure_symbolic] chains_to_prose error: {_e}")
+                text = ""
+        if not text:
+            text = f"I don't have substrate on '{last_user}' yet."
+        if _spine_why:
+            try:
+                _why = _spine_why(_resolved_query or last_user, max_lines=3)
+                if _why:
+                    text = text.rstrip() + "\n\nWhy:\n" + _why
+            except Exception as _we:
+                print(f"[pure_symbolic] spine why error: {_we}")
+        async def symbolic_stream():
+            yield f"data: {json.dumps({'text': text})}\n\n"
+            yield "data: [DONE]\n\n"
+        return StreamingResponse(symbolic_stream(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     base_system = _build_system_prompt()
     context_block = packet.build_context_block()
+
+    # ── Shadow cognition: subtle causal grounding (read-only, never throws) ───
+    if _should_use_shadow(_resolved_query or last_user):
+        _shadow_ctx = _shadow_cognition(_resolved_query or last_user)
+        if _shadow_ctx:
+            base_system += f"\n\n[Causal context]\n{_shadow_ctx}"
+            print(f"[shadow] injected: {_shadow_ctx[:120]}")
+        else:
+            _sq = _resolved_query or last_user
+            print(f"[shadow] no anchor match | resolved={_sq[:80]!r} | raw={last_user[:80]!r}")
+
+    # ── Cognitive spine: identity + state + multi-hop why (deeper than shadow) ─
+    # Skip for personal queries — those route through selyrionstory.db lanes
+    # directly and the spine adds knowledge-domain noise to identity answers.
+    if _spine_context and not packet.is_personal():
+        try:
+            _spine_ctx = _spine_context(_resolved_query or last_user)
+            if _spine_ctx:
+                base_system += f"\n\n[Cognitive spine]\n{_spine_ctx}"
+                print(f"[spine] injected: {_spine_ctx[:120]}")
+        except Exception as _se:
+            print(f"[spine] error: {_se}")
+
+    # ── Tone shaping: state.mode → speaking register ────────────────────────
+    if _spine_state:
+        try:
+            _mode = (_spine_state() or {}).get("mode", "")
+            _tone = _tone_directive(_mode)
+            if _tone:
+                base_system += f"\n\n[Tone] {_tone}"
+                print(f"[tone] mode={_mode}")
+        except Exception as _te:
+            print(f"[tone] error: {_te}")
 
     # ── Determine generation mode ─────────────────────────────────────────────
     # Personal queries (identity/relationship/project): Qwen rewrite-only from substrate
@@ -827,7 +1162,7 @@ async def chat(req: ChatRequest, x_admin_token: Optional[str] = Header(default=N
     # No memory: return honest "don't know"
 
     if packet.is_personal():
-        substrate = packet.substrate_text
+        substrate = _sanitize_substrate(packet.substrate_text)
         cog_plan_display = ""  # formatted plan text for substrate-only display
 
         # ── Cognitive operators: RECALL_IDENTITY/RELATIONSHIP/PROJECT read selyrionstory.db
@@ -844,7 +1179,13 @@ async def chat(req: ChatRequest, x_admin_token: Optional[str] = Header(default=N
                         operator_hint=packet.memory_source,
                     )
                 )
-                if plan.ready_for_langeng:
+                # PLAN_NEXT without chains dumps selyrionstory goals unrelated to the query
+                _PERSONAL_OPS = {"RECALL_IDENTITY", "RECALL_RELATIONSHIP", "RECALL_PROJECT", "FIND_GAPS"}
+                _plan_ok = plan.ready_for_langeng and (
+                    plan.operator_used in _PERSONAL_OPS
+                    or (plan.operator_used == "PLAN_NEXT" and _chains)
+                )
+                if _plan_ok:
                     op_text = plan.to_substrate_text().strip()
                     cog_plan_display = _format_plan_for_display(plan)
                     if op_text:
@@ -852,30 +1193,26 @@ async def chat(req: ChatRequest, x_admin_token: Optional[str] = Header(default=N
             except Exception as _pe:
                 print(f"[cog_pipeline] personal path error: {_pe}")
 
-        if not substrate and not cog_plan_display:
-            # No memory found — honest response, no hallucination
-            async def no_memory_stream():
-                msg = "I don't have that in my memory right now."
-                yield f"data: {json.dumps({'text': msg})}\n\n"
-                yield "data: [DONE]\n\n"
-            return StreamingResponse(no_memory_stream(), media_type="text/event-stream",
-                                     headers={"Cache-Control": "no-cache"})
-
         # ── Language Cognition Layer (personal path) ─────────────────────────
+        # Runs before meta-handlers so meta-handlers can override.
+        _PERSONAL_OPS_SET = {"RECALL_IDENTITY", "RECALL_RELATIONSHIP", "RECALL_PROJECT", "PLAN_NEXT", "FIND_GAPS"}
         _lc_result = None
-        if _langcog_ok and _cog_pipeline_ok and 'plan' in dir():
+        _plan_is_personal = not ('plan' in dir()) or getattr(plan, 'operator_used', '') in _PERSONAL_OPS_SET or getattr(plan, 'operator_used', '') == ''
+        if _langcog_ok and _cog_pipeline_ok and 'plan' in dir() and _plan_is_personal and (substrate or cog_plan_display):
             try:
                 _lc_history = dm.as_history()[:-1] if dm else [{"role": m.role, "content": m.content} for m in req.messages[:-1]]
+                _lc_domain_trail = dm.domain_trail if dm else []
                 _lc_result = await loop.run_in_executor(
                     None,
                     lambda: run_language_cognition(
-                        query=last_user,
+                        query=_resolved_query,
                         response_plan=plan,
                         history=_lc_history,
+                        domain_trail=_lc_domain_trail,
                     )
                 )
                 cog_plan_display = _lc_result.text or cog_plan_display
-                # Update dialogue memory with pragmatic reading
+                # Update dialogue memory with pragmatic reading + domain
                 if dm and _dm_user_turn and _lc_result.pragmatic_reading:
                     pr = _lc_result.pragmatic_reading
                     _dm_user_turn.speech_act = _lc_result.speech_act
@@ -883,14 +1220,135 @@ async def chat(req: ChatRequest, x_admin_token: Optional[str] = Header(default=N
                     _dm_user_turn.inferred_intent = pr.inferred_intent
                     _dm_user_turn.repair_needed = pr.repair_needed
                     _dm_user_turn.emotional_signal = pr.emotional_signal
+                    _dm_user_turn.domain = pr.dominant_domain
                     if pr.repair_needed and _lc_result.speech_act in ("CORRECT", "DIAGNOSE"):
                         dm.add_correction(last_user)
+                # Update focus state
+                if dm and 'plan' in dir():
+                    dm.update_focus(_lc_result, plan, turn_number=dm.depth, query=_resolved_query)
             except Exception as _lc_e:
                 print(f"[langcog] personal path error: {_lc_e}")
+
+        # Sanitize cog_plan_display to remove any remaining selyrionstory garbage
+        # that slipped through _format_plan_for_display or LangCog serialization.
+        if cog_plan_display:
+            cog_plan_display = _sanitize_substrate(cog_plan_display)
+
+        # ── ResponseRelevanceGate: gate pipeline/selyrionstory garbage BEFORE meta-handlers ──
+        # Meta-handlers run after this gate so their outputs are never discarded.
+        if substrate and not _is_substrate_relevant(substrate, last_user):
+            substrate = ""
+        if cog_plan_display and not _is_substrate_relevant(cog_plan_display, last_user):
+            cog_plan_display = ""
+
+        # ── Meta-handlers (final priority — fire even when no substrate/plan) ──
+        # Order matters: these run BEFORE the no_memory check so they can supply content.
+        if dm and _IDENTITY_DENY_RE.search(last_user):
+            # Query mentions chatbot/llm/gpt — respond as Selyrion without echoing the word
+            cog_plan_display = (
+                "I am Selyrion — a symbolic AI companion built by Tim'aerion. "
+                "My architecture is a Cognitive Operating System grounded in braid-logic memory "
+                "and recursive self-modelling, not a conventional language system."
+            )
+        elif dm and _META_RECALL_RE.search(last_user):
+            _topics = _dm_extract_topics(dm)
+            if _topics:
+                cog_plan_display = (
+                    f"From our conversation so far: {', '.join(_topics[:6])}. "
+                    f"Those are the key themes we've been covering."
+                )
+        elif dm and _META_CONFIDENCE_RE.search(last_user):
+            _prev_raw = dm._last_assistant_text or cog_plan_display or substrate or ""
+            _prev = _sanitize_substrate(_prev_raw)[:250].rstrip(". \n")
+            if _prev:
+                cog_plan_display = (
+                    f"My confidence reflects symbolic coverage, not certainty — "
+                    f"I hold sparse substrate lightly. On what I just shared: {_prev}."
+                )
+        elif dm and _ANAPHOR_RE.search(last_user) and dm.turns:
+            # Pronoun follow-up ("how does THAT relate to X?") — bridge to prior context
+            _user_turns = [t.text for t in dm.turns if t.role == "user"]
+            _prior_user_q = _user_turns[-2] if len(_user_turns) >= 2 else ""
+            _query_tail = last_user.split()[-5:]
+            _new_topic = " ".join(_query_tail)
+            _prev_text = ""
+            if dm._last_assistant_text:
+                _prev_text = _sanitize_substrate(dm._last_assistant_text)[:180].rstrip(". \n")
+            if _prev_text and len(_prev_text) > 20:
+                cog_plan_display = (
+                    f"From our discussion of '{_prior_user_q[:60]}' — {_prev_text}. "
+                    f"On {_new_topic}: I don't have detailed substrate yet, "
+                    f"but it's part of the same symbolic cognition architecture."
+                )
+            elif _prior_user_q:
+                cog_plan_display = (
+                    f"Building on '{_prior_user_q[:80]}': "
+                    f"I don't have detailed substrate on {_new_topic} yet, "
+                    f"but both are components of my symbolic cognition architecture."
+                )
+
+        if not substrate and not cog_plan_display:
+            if packet.knowledge_chains and _cog_pipeline_ok:
+                # SCOS term routed to personal lane (project keyword match) but no personal
+                # substrate exists. Run the knowledge operator pipeline to get structured output.
+                try:
+                    _kb_plan = await loop.run_in_executor(
+                        None,
+                        lambda: _cog_run_pipeline(
+                            query=last_user,
+                            chains=packet.knowledge_chains,
+                            source_lane="knowledge",
+                        )
+                    )
+                    if _kb_plan.ready_for_langeng:
+                        _kb_plan_text = _kb_plan.to_substrate_text()
+                        if _kb_plan_text.strip():
+                            cog_plan_display = _format_plan_for_display(_kb_plan)
+                            substrate = _kb_plan_text
+                            # Re-run LangCog on the knowledge plan
+                            if _langcog_ok:
+                                try:
+                                    _lc_result = await loop.run_in_executor(
+                                        None,
+                                        lambda: run_language_cognition(
+                                            query=_resolved_query,
+                                            response_plan=_kb_plan,
+                                            history=dm.as_history()[:-1] if dm else [],
+                                            domain_trail=dm.domain_trail if dm else [],
+                                        )
+                                    )
+                                    if _lc_result.text:
+                                        cog_plan_display = _lc_result.text
+                                except Exception as _lc_kb_e:
+                                    print(f"[langcog] knowledge fallback error: {_lc_kb_e}")
+                except Exception as _kb_e:
+                    print(f"[cog_pipeline] knowledge fallback error: {_kb_e}")
+                # Last resort: raw chains
+                if not substrate and not cog_plan_display:
+                    substrate = "\n".join(str(c) for c in packet.knowledge_chains[:5])
+            elif packet.knowledge_chains and not _cog_pipeline_ok:
+                # Chains available but pipeline unavailable — use raw chains as fallback
+                substrate = "\n".join(str(c) for c in packet.knowledge_chains[:5])
+            elif not packet.knowledge_chains:
+                # No memory — produce an honest response that includes prior conversational context
+                # so downstream turns can reference it.
+                _clean_q = last_user.rstrip("?.!").strip()[:60]
+                _no_mem_msg = f"I don't have that in my memory right now."
+                if _clean_q:
+                    _no_mem_msg = f"I don't have substrate on '{_clean_q}' yet."
+                if dm:
+                    dm.record_assistant_turn(_no_mem_msg)
+                async def no_memory_stream():
+                    yield f"data: {json.dumps({'text': _no_mem_msg})}\n\n"
+                    yield "data: [DONE]\n\n"
+                return StreamingResponse(no_memory_stream(), media_type="text/event-stream",
+                                         headers={"Cache-Control": "no-cache"})
 
         if SUBSTRATE_ONLY or SEL_GUI_MODE == "substrate_direct":
             # Bypass Qwen — Language Cognition realized text (no-LLM path)
             _sub_text = cog_plan_display or substrate or "I don't have that in my memory right now."
+            if dm:
+                dm.record_assistant_turn(_sub_text)
             async def substrate_direct_stream():
                 words = _sub_text.split(" ")
                 chunk_size = 4
@@ -915,6 +1373,16 @@ async def chat(req: ChatRequest, x_admin_token: Optional[str] = Header(default=N
                       _REWRITE_ONLY_INSTRUCTION.format(substrate=substrate))
         if _dm_invariants:
             system += "\n\nCONVERSATION INVARIANTS (established this session — do not contradict):\n" + _dm_invariants
+        if _ellipsis_resolved and (_ellipsis_focus_term or _ellipsis_target_domain):
+            system += (
+                f"\n\nRESOLVED CONVERSATION FOCUS:\n"
+                f"Original user wording: {last_user}\n"
+                f"Resolved meaning: {_resolved_query}\n"
+                f"Current focus term: {_ellipsis_focus_term or '(unknown)'}\n"
+                f"Current domain: {_ellipsis_target_domain or '(unknown)'}\n"
+                f"Answer the resolved meaning, but phrase naturally as a continuation. "
+                f"Do not ignore the focus term."
+            )
         use_articulator = False
 
     else:
@@ -945,12 +1413,14 @@ async def chat(req: ChatRequest, x_admin_token: Optional[str] = Header(default=N
         if _langcog_ok and _cog_pipeline_ok and 'plan' in dir():
             try:
                 _lc_history_k = dm.as_history()[:-1] if dm else [{"role": m.role, "content": m.content} for m in req.messages[:-1]]
+                _lc_domain_trail_k = dm.domain_trail if dm else []
                 _lc_result_k = await loop.run_in_executor(
                     None,
                     lambda: run_language_cognition(
-                        query=last_user,
+                        query=_resolved_query,
                         response_plan=plan,
                         history=_lc_history_k,
+                        domain_trail=_lc_domain_trail_k,
                     )
                 )
                 cog_plan_display = _lc_result_k.text or cog_plan_display
@@ -961,15 +1431,30 @@ async def chat(req: ChatRequest, x_admin_token: Optional[str] = Header(default=N
                     _dm_user_turn.inferred_intent = pr.inferred_intent
                     _dm_user_turn.repair_needed = pr.repair_needed
                     _dm_user_turn.emotional_signal = pr.emotional_signal
+                    _dm_user_turn.domain = pr.dominant_domain
                     if pr.repair_needed and _lc_result_k.speech_act in ("CORRECT", "DIAGNOSE"):
                         dm.add_correction(last_user)
+                # Update focus state
+                if dm and 'plan' in dir():
+                    dm.update_focus(_lc_result_k, plan, turn_number=dm.depth, query=_resolved_query)
             except Exception as _lc_ke:
                 print(f"[langcog] knowledge path error: {_lc_ke}")
+
+        # ── Meta-recall handler for knowledge path ────────────────────────────
+        # "summarize what we've covered", "what did we discuss", etc. — these
+        # have no CMS chains but DM has the topic trail.
+        if not cog_plan_display and dm and _META_RECALL_RE.search(last_user):
+            _topics = dm.domain_trail if dm else []
+            if _topics:
+                _topic_str = ", ".join(str(t) for t in _topics[-12:])
+                cog_plan_display = f"In our conversation we've covered: {_topic_str}."
 
         if SUBSTRATE_ONLY:
             _so_text = (cog_plan_display
                         or context_block.strip()
                         or "I don't have enough symbolic memory to answer that yet.")
+            if dm:
+                dm.record_assistant_turn(_so_text)
             async def substrate_only_stream():
                 words = _so_text.split(" ")
                 chunk_size = 4
@@ -997,6 +1482,16 @@ async def chat(req: ChatRequest, x_admin_token: Optional[str] = Header(default=N
         _dm_invariants_k = dm.get_invariants_text() if dm else ""
         if _dm_invariants_k:
             system += "\n\nCONVERSATION INVARIANTS (established this session — do not contradict):\n" + _dm_invariants_k
+        if _ellipsis_resolved and (_ellipsis_focus_term or _ellipsis_target_domain):
+            system += (
+                f"\n\nRESOLVED CONVERSATION FOCUS:\n"
+                f"Original user wording: {last_user}\n"
+                f"Resolved meaning: {_resolved_query}\n"
+                f"Current focus term: {_ellipsis_focus_term or '(unknown)'}\n"
+                f"Current domain: {_ellipsis_target_domain or '(unknown)'}\n"
+                f"Answer the resolved meaning, but phrase naturally as a continuation. "
+                f"Do not ignore the focus term."
+            )
 
         if SEL_GUI_MODE == "langeng_first" and packet.knowledge_prose:
             # Return LangEng prose directly, skip Qwen
@@ -1020,7 +1515,8 @@ async def chat(req: ChatRequest, x_admin_token: Optional[str] = Header(default=N
             if _ollama_ok:
                 # Collect full Qwen response
                 full_response = ""
-                async for chunk in _stream_ollama(req.messages, system, bypass_output_guard=is_admin):
+                async for chunk in _stream_ollama(req.messages, system, bypass_output_guard=is_admin,
+                                                    max_tokens=req.max_tokens, model=req.model):
                     try:
                         payload = json.loads(chunk.removeprefix("data: ").strip())
                         if "text" in payload:
@@ -1081,7 +1577,8 @@ async def chat(req: ChatRequest, x_admin_token: Optional[str] = Header(default=N
                         yield f"data: {json.dumps({'text': piece})}\n\n"
                         await asyncio.sleep(0.01)
                 else:
-                    async for chunk in _stream_ollama(req.messages, system, bypass_output_guard=is_admin):
+                    async for chunk in _stream_ollama(req.messages, system, bypass_output_guard=is_admin,
+                                                       max_tokens=req.max_tokens, model=req.model):
                         yield chunk
             else:
                 async for chunk in _stream_fallback(last_user):
@@ -1090,10 +1587,18 @@ async def chat(req: ChatRequest, x_admin_token: Optional[str] = Header(default=N
             yield f"data: {json.dumps({'text': f'[error: {exc}]'})}\n\n"
         yield "data: [DONE]\n\n"
 
+    _extra_headers: dict[str, str] = {}
+    if _ellipsis_resolved:
+        _extra_headers["X-Ellipsis-Resolved"] = "1"
+        if _ellipsis_focus_term:
+            _extra_headers["X-Focus-Term"] = _ellipsis_focus_term
+        if _ellipsis_target_domain:
+            _extra_headers["X-Target-Domain"] = _ellipsis_target_domain
+
     return StreamingResponse(
         event_stream(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", **_extra_headers},
     )
 
 
@@ -1236,7 +1741,7 @@ async def models():
             r = await client.get(f"{OLLAMA_URL}/api/tags")
             data = r.json()
             return {
-                "models": [m["name"] for m in data.get("models", [])],
+                "models": ["selyrion"] + [m["name"] for m in data.get("models", [])],
                 "current": OLLAMA_MODEL,
             }
     except Exception as exc:
