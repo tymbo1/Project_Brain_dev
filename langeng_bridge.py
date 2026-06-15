@@ -140,7 +140,8 @@ def infer_expression_domain(query: str) -> str | None:
     if not query:
         return None
     ql = query.lower()
-    words = set(ql.split())
+    words = {w.strip(".,!?;:\"'()[]{}—–-") for w in ql.split()}
+    words.discard("")
     best, best_hits = None, 0
     for d, triggers in _EXPR_DOMAIN_TRIGGERS.items():
         hits = 0
