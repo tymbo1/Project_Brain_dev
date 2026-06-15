@@ -245,7 +245,18 @@ def _load_eden():
         _eden_chat = None
 
 # ── CMS / SSRE bootstrap ──────────────────────────────────────────────────────
-
+#
+# SSRE clarity (verdict 2026-06-15):
+#   - SSRE-as-runtime-class (inference.ssre.SSRE): INTENTIONALLY RETIRED.
+#     Replaced by inference/activation_engine.py. The loader below is preserved
+#     for audit/lineage trace only; it always fails because the module no
+#     longer exists. _cms_retrieve falls through to direct DB text search.
+#   - SSRE-as-precomputed-data (ssre_top_semantic, ssre_attractor_cache tables
+#     in resonance_v11.db): INTENTIONALLY KEPT. Consumed by activation_engine
+#     for semantic-domain and attractor-score features. ssre_precompute.py at
+#     repo root produces these.
+# See memory: project_ssre_clarity_verdict.md
+#
 _ssre = None
 
 def _load_ssre():
@@ -255,7 +266,7 @@ def _load_ssre():
         _ssre = SSRE(str(DB_PATH))
         print("[ssre] loaded OK")
     except Exception as exc:
-        print(f"[ssre] unavailable: {exc}")
+        print(f"[ssre] retired (runtime class absent): {exc}")
         _ssre = None
 
 # ── Activation Engine bootstrap ──────────────────────────────────────────────
@@ -1785,12 +1796,32 @@ async def research_web(req: WebSearchRequest):
 
 # ── Health ────────────────────────────────────────────────────────────────────
 
+def _ssre_precompute_status() -> str:
+    """Reports presence of SSRE precomputed feature tables in resonance_v11.db.
+
+    SSRE-runtime is retired; SSRE-precompute tables are still consumed by
+    activation_engine. See project_ssre_clarity_verdict.md.
+    """
+    try:
+        import sqlite3
+        con = sqlite3.connect(str(DB_PATH))
+        rows = con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name IN ('ssre_top_semantic','ssre_attractor_cache')"
+        ).fetchall()
+        con.close()
+        return "live" if len(rows) == 2 else ("partial" if rows else "absent")
+    except Exception:
+        return "unknown"
+
+
 @app.get("/health")
 async def health():
     return {
         "status":             "ok",
         "eden":               _eden_chat is not None,
-        "ssre":               _ssre is not None,
+        "ssre_runtime":       "retired",
+        "ssre_precompute":    _ssre_precompute_status(),
         "activation_engine":  _activation_engine is not None,
         "articulator":        _articulate is not None,
         "identity_grounding": len(_identity_grounding) > 0,
