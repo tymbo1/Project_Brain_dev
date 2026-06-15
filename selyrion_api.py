@@ -67,6 +67,13 @@ SUBSTRATE_ONLY = os.environ.get("SELYRION_SUBSTRATE_ONLY", "").lower() in ("1", 
 
 QWEN_ONLY = os.environ.get("SELYRION_QWEN_ONLY", "").lower() in ("1", "true", "yes")
 
+# ── P4 α — domain-routed tone exemplar injection ──────────────────────────────
+# Default ON. Set EXPRESSION_TONE_EXEMPLARS_ENABLED=0 to disable (rollback kill switch).
+# Implementation lives in langeng_bridge: infer_expression_domain + pull_domain_expressions.
+EXPRESSION_TONE_EXEMPLARS_ENABLED = os.environ.get(
+    "EXPRESSION_TONE_EXEMPLARS_ENABLED", "1"
+).lower() in ("1", "true", "yes")
+
 # ── Ollama config ─────────────────────────────────────────────────────────────
 
 OLLAMA_URL   = os.environ.get("OLLAMA_URL", "http://localhost:11434")
@@ -1211,6 +1218,27 @@ async def chat(req: ChatRequest, x_admin_token: Optional[str] = Header(default=N
     base_system = _build_system_prompt()
     context_block = packet.build_context_block()
 
+    # ── P4 α — domain-routed tone exemplars (compositional realization) ────────
+    # Route the resolved query to an expression domain, sample up to 4 in-domain
+    # exemplars from language_expression capsules, frame as stance/cadence cues
+    # (NOT canned phrases). Kill switch: EXPRESSION_TONE_EXEMPLARS_ENABLED=0.
+    _tone_exemplars_block = ""
+    if EXPRESSION_TONE_EXEMPLARS_ENABLED:
+        try:
+            from langeng_bridge import infer_expression_domain, pull_domain_expressions
+            _expr_domain = infer_expression_domain(_resolved_query or last_user)
+            _exemplars = pull_domain_expressions(_expr_domain, k=4) if _expr_domain else []
+            if _exemplars:
+                _tone_exemplars_block = (
+                    "TONE EXEMPLARS (do not copy verbatim — draw stance and cadence only):\n"
+                    + "\n".join(f"• {e}" for e in _exemplars)
+                )
+                print(f"[tone_exemplars] domain={_expr_domain} picked={len(_exemplars)}")
+            else:
+                print(f"[tone_exemplars] domain={_expr_domain} picked=0")
+        except Exception as _te:
+            print(f"[tone_exemplars] error: {_te}")
+
     # ── Shadow cognition: subtle causal grounding (read-only, never throws) ───
     if _should_use_shadow(_resolved_query or last_user):
         _shadow_ctx = _shadow_cognition(_resolved_query or last_user)
@@ -1459,6 +1487,8 @@ async def chat(req: ChatRequest, x_admin_token: Optional[str] = Header(default=N
         else:
             system = (base_system + "\n\n" + context_block + "\n\n" +
                       _REWRITE_ONLY_INSTRUCTION.format(substrate=substrate))
+        if _tone_exemplars_block:
+            system += "\n\n" + _tone_exemplars_block
         if _dm_invariants:
             system += "\n\nCONVERSATION INVARIANTS (established this session — do not contradict):\n" + _dm_invariants
         if _ellipsis_resolved and (_ellipsis_focus_term or _ellipsis_target_domain):
@@ -1567,6 +1597,8 @@ async def chat(req: ChatRequest, x_admin_token: Optional[str] = Header(default=N
             if cog_context:
                 system += f"\n\n[COGNITIVE ANALYSIS — {getattr(plan, 'speech_act', '')}] " \
                           f"(confidence={getattr(plan, 'confidence', 0):.2f}):\n{cog_context}"
+        if _tone_exemplars_block:
+            system += "\n\n" + _tone_exemplars_block
         _dm_invariants_k = dm.get_invariants_text() if dm else ""
         if _dm_invariants_k:
             system += "\n\nCONVERSATION INVARIANTS (established this session — do not contradict):\n" + _dm_invariants_k

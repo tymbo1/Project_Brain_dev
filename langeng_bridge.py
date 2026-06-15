@@ -92,6 +92,123 @@ def _concept_capsule_domains(query: str) -> list[str]:
     return ["intellectual_curiosity_general", "intellectual_curiosity"]
 
 
+# ── Expression-domain triggers (P4 α — compositional realization) ────────────
+# Keyword sets mirror the canonical seed-capsule trigger_patterns for each of the
+# 7 expressive domains. Used by infer_expression_domain() to route a query to
+# its dominant expression domain so pull_domain_expressions() can sample matching
+# capsules. The "chess" domain is deliberately excluded — game flow shouldn't
+# pull expressive tone material.
+_EXPR_DOMAIN_TRIGGERS: dict[str, set[str]] = {
+    "intellectual_curiosity": {
+        "why", "how", "what if", "curious", "wonder", "think", "theory",
+        "understand", "explain", "meaning", "consciousness", "knowledge",
+    },
+    "emotional_resonance": {
+        "grief", "loss", "sadness", "fear", "lonely", "hurt", "pain", "miss",
+        "cry", "hard", "difficult", "struggle", "vulnerable", "scared",
+        "angry", "emotion", "feel",
+    },
+    "practical_grounding": {
+        "help", "how do", "what should", "advice", "plan", "steps",
+        "practical", "do i", "should i", "want to",
+    },
+    "relational_warmth": {
+        "friend", "family", "relationship", "together", "love", "care",
+        "connect", "belong", "bond", "trust",
+    },
+    "spiritual_inquiry": {
+        "soul", "spirit", "divine", "sacred", "god", "purpose", "prayer",
+        "meditat", "universe",
+    },
+    "creative_engagement": {
+        "story", "poem", "imagine", "create", "art", "write", "narrative",
+        "dream", "vision", "make",
+    },
+    "humour_lightness": {
+        "funny", "laugh", "joke", "silly", "lighten", "smile", "playful",
+        "haha", "heh", "absurd",
+    },
+}
+
+
+def infer_expression_domain(query: str) -> str | None:
+    """Route a user query to its dominant expression domain (or None).
+
+    Returns one of the 7 expressive domains when keyword hits exceed the
+    threshold; otherwise None (e.g. for knowledge-only queries).
+    """
+    if not query:
+        return None
+    ql = query.lower()
+    words = set(ql.split())
+    best, best_hits = None, 0
+    for d, triggers in _EXPR_DOMAIN_TRIGGERS.items():
+        hits = 0
+        for t in triggers:
+            if " " in t:
+                if t in ql:
+                    hits += 1
+            elif t in words:
+                hits += 1
+        if hits > best_hits:
+            best, best_hits = d, hits
+    return best if best_hits >= 1 else None
+
+
+_DOMAIN_POOL_CACHE: dict[str, list[str]] = {}
+
+
+def _domain_pool(domain: str) -> list[str]:
+    """Pool of usable expressions for a domain (lazy-loaded, process-cached)."""
+    if domain in _DOMAIN_POOL_CACHE:
+        return _DOMAIN_POOL_CACHE[domain]
+    pool: list[str] = []
+    try:
+        db = sqlite3.connect(str(_RESONANCE_DB))
+        rows = db.execute(
+            "SELECT metadata FROM capsules "
+            "WHERE capsule_type='language_expression' AND domain=? LIMIT 128",
+            (domain,)
+        ).fetchall()
+        db.close()
+        for (meta_json,) in rows:
+            try:
+                m = json.loads(meta_json)
+            except Exception:
+                continue
+            for e in m.get("expressions", []):
+                if not isinstance(e, str):
+                    continue
+                if not (50 < len(e) < 280):
+                    continue
+                if _EXPR_REJECT.search(e):
+                    continue
+                if _EXPR_REJECT_QUESTION.search(e.strip()):
+                    continue
+                if _EXPR_REJECT_2ND_PERSON.match(e.strip()):
+                    continue
+                pool.append(_EXPR_CLEAN.sub("", e).strip())
+    except Exception:
+        pass
+    _DOMAIN_POOL_CACHE[domain] = pool
+    return pool
+
+
+def pull_domain_expressions(domain: str | None, k: int = 4) -> list[str]:
+    """Return up to k randomly-sampled in-domain expressions as tone exemplars.
+
+    Compositional ingredient, not whole-phrase substitute. Caller is expected
+    to wrap the result in a "do not copy verbatim" framing block.
+    Returns [] for unknown domains or empty pools.
+    """
+    if not domain:
+        return []
+    pool = _domain_pool(domain)
+    if not pool:
+        return []
+    return random.sample(pool, min(k, len(pool)))
+
+
 @functools.lru_cache(maxsize=512)
 def _pull_expression(query: str) -> str:
     """
