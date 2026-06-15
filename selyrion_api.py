@@ -794,6 +794,54 @@ def _cms_context_for_chat(query: str) -> tuple[str, list, str | None]:
     return "\n".join(lines), [], None
 
 
+# ── Knowledge-lane focus filter ───────────────────────────────────────────────
+
+_KL_STOP = frozenset({
+    "the","a","an","is","are","was","were","be","been","being","of","to","in",
+    "on","at","by","for","with","as","that","this","these","those","what",
+    "which","who","whom","whose","how","why","when","where","and","or","but",
+    "not","no","yes","same","like","kind","type","form","sort","other",
+    "another","more","most","very","just","also","than","then","do","does",
+    "did","have","has","had","can","could","would","should","may","might",
+    "must","it","its","one","some","any","all","each","every","such","about",
+    "into","from","over","under","across","between","among","through","i",
+    "me","my","you","your","we","us","our","they","them","their","he","she",
+    "his","her","him","there","here","so","if","whether","up","down","out",
+    "off","still","yet","already","only","even","also","both","either",
+    "neither","really","actually","maybe","perhaps","seem","seems","seemed",
+})
+
+def _kl_chain_text(c) -> str:
+    if isinstance(c, str):
+        return c.lower()
+    if isinstance(c, dict):
+        return " ".join(str(v) for v in c.values()).lower()
+    if isinstance(c, (list, tuple)):
+        return " ".join(str(v) for v in c).lower()
+    return str(c).lower()
+
+def _filter_knowledge_chains_by_focus(chains, resolved_query: str,
+                                      focus_term: str | None):
+    """Keep chains that share at least one topical term with the resolved query.
+
+    Defence against knowledge-lane domain drift (audit priority 2). Retrieval
+    can surface marginal cross-domain anchors at comparable strength to topical
+    ones; this filter prevents them from reaching the rewriter where they get
+    obediently echoed as if grounded.
+    """
+    if not chains or not resolved_query:
+        return chains
+    terms = {w for w in re.findall(r"[a-z][a-z0-9_-]{2,}", resolved_query.lower())
+             if w not in _KL_STOP}
+    if focus_term:
+        for w in re.findall(r"[a-z][a-z0-9_-]{2,}", focus_term.lower()):
+            if w not in _KL_STOP:
+                terms.add(w)
+    if not terms:
+        return chains
+    return [c for c in chains if any(t in _kl_chain_text(c) for t in terms)]
+
+
 # ── Chat endpoint ─────────────────────────────────────────────────────────────
 
 async def _stream_ollama(messages: list, system: str, bypass_output_guard: bool = False,
@@ -1092,6 +1140,35 @@ async def chat(req: ChatRequest, x_admin_token: Optional[str] = Header(default=N
     packet = await loop.run_in_executor(
         None, lambda: _mem_router.route(_resolved_query, auth_level)
     )
+
+    # ── Knowledge-lane focus discipline ───────────────────────────────────────
+    # Drop retrieved chains that share no surface terms with the resolved query
+    # before they reach the rewriter. Closes audit priority 2 (knowledge-lane
+    # domain drift). Substrate retrieval may surface marginal cross-domain
+    # anchors; the rewriter must not see them.
+    if packet.knowledge_chains and _resolved_query:
+        try:
+            _orig = len(packet.knowledge_chains)
+            packet.knowledge_chains = _filter_knowledge_chains_by_focus(
+                packet.knowledge_chains, _resolved_query, _ellipsis_focus_term
+            )
+            _kept = len(packet.knowledge_chains)
+            if _kept < _orig:
+                print(f"[knowledge_lane] focus filter: {_orig}->{_kept} chains "
+                      f"(query={_resolved_query!r} focus={_ellipsis_focus_term!r})")
+                if packet.knowledge_chains and _chains_to_prose:
+                    try:
+                        packet.knowledge_prose = _chains_to_prose(
+                            _resolved_query, packet.knowledge_chains
+                        ) or ""
+                    except Exception as _e:
+                        print(f"[knowledge_lane] re-prose error: {_e}")
+                        packet.knowledge_prose = ""
+                else:
+                    packet.knowledge_prose = ""
+                    packet.knowledge_capsule = None
+        except Exception as _e:
+            print(f"[knowledge_lane] filter error: {_e}")
 
     # ── Pure-symbolic mode: zero LLM. Deterministic prose from CMS only. ──────
     if req.pure_symbolic:

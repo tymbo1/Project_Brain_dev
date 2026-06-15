@@ -129,6 +129,26 @@ _AND_THE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# "Is that the same as X?" / "Is this like X?" / "Are these similar to X?"
+# Anaphoric comparator — "that/this/it/these/those" stands in for focus_term.
+_ANAPHORIC_COMPARE_RE = re.compile(
+    r'^(?:and\s+)?(?:is|are|was|were)\s+(?:that|this|it|these|those)\s+'
+    r'(the\s+same\s+as|like|similar\s+to|equivalent\s+to|'
+    r'a\s+kind\s+of|a\s+type\s+of|a\s+form\s+of|the\s+opposite\s+of|'
+    r'related\s+to|connected\s+to|different\s+from)\s+'
+    r'(.+?)[\?.]?\s*$',
+    re.IGNORECASE,
+)
+
+# "How is that different from X?" / "How does this differ from X?"
+_ANAPHORIC_DIFF_RE = re.compile(
+    r'^(?:and\s+)?how\s+(?:is|does)\s+(?:that|this|it)\s+'
+    r'(?:different\s+from|differ\s+from|distinct\s+from|unlike)\s+'
+    r'(.+?)[\?.]?\s*$',
+    re.IGNORECASE,
+)
+
+
 # ── Domain phrase map (canonical → canonical) ─────────────────────────────────
 # Same aliases as _extract_explicit_domain in pragmatics.py
 
@@ -276,6 +296,29 @@ def resolve_elliptic_query(query: str, focus: FocusState | None) -> ResolvedQuer
             original_query=q, resolved_query=resolved,
             focus_term=ft, target_domain=None,
             confidence=0.75, reason="ordinal_sense", was_resolved=True,
+        )
+
+    # ── Pattern: "Is that the same as X?" / "Is this like X?" ────────────────
+    m = _ANAPHORIC_COMPARE_RE.match(q)
+    if m:
+        comparator = re.sub(r'\s+', ' ', m.group(1).strip().lower())
+        other = m.group(2).strip().rstrip("?.")
+        resolved = f"Is {ft} {comparator} {other}?"
+        return ResolvedQuery(
+            original_query=q, resolved_query=resolved,
+            focus_term=ft, target_domain=focus.current_focus_domain,
+            confidence=0.82, reason="anaphoric_compare", was_resolved=True,
+        )
+
+    # ── Pattern: "How is that different from X?" ─────────────────────────────
+    m = _ANAPHORIC_DIFF_RE.match(q)
+    if m:
+        other = m.group(1).strip().rstrip("?.")
+        resolved = f"How is {ft} different from {other}?"
+        return ResolvedQuery(
+            original_query=q, resolved_query=resolved,
+            focus_term=ft, target_domain=focus.current_focus_domain,
+            confidence=0.80, reason="anaphoric_diff", was_resolved=True,
         )
 
     # ── Pattern: "How does that relate/compare?" ──────────────────────────────
