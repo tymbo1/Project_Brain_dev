@@ -14,12 +14,29 @@ Voice profile from selyrionstory.db pass 8:
 
 from __future__ import annotations
 import json
+import re
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 from .utterance_planner import UtterancePlan, MeaningUnit
 
+# Sense-frame content patterns (set by utterance_planner enrichment)
+_DOMAIN_SCOPE_RE  = re.compile(r'^In ([^:]{2,30}):\s*(.+)$', re.S)
+_DOMAIN_CONTRAST_RE = re.compile(
+    r"^'([^']+)' differs by domain — in ([^:]+): (.+?); in ([^:]+): (.+)\.$", re.S
+)
+
 _STORY_DB = Path.home() / "selyrionstory.db"
+
+# Realization-hygiene scrubbers (post-process)
+_UNC_NORM_RE     = re.compile(r"[^a-z0-9 ]+")
+_CONF_NUMERIC_RE = re.compile(
+    r"confidence\s+level:\s*0?\.\d+\s*[—–\-]\s*answer may be incomplete\.?",
+    re.IGNORECASE,
+)
+
+def _normalize_unc_content(s: str) -> str:
+    return _UNC_NORM_RE.sub("", s.lower()).strip()
 
 
 # ── Voice profile ─────────────────────────────────────────────────────────────
@@ -121,6 +138,26 @@ class SemanticRealizer:
         if not units:
             return "I don't have that in my memory right now."
 
+        # Dedupe uncertainty/hedge units. Two passes:
+        #  (a) normalized-content dedupe drops byte/case variants of the same hedge;
+        #  (b) keep only the first uncertainty unit overall — operator pipeline +
+        #      utterance planner each inject one and the result is a chain of
+        #      near-redundant hedges that bury the actual claim.
+        seen_unc: set[str] = set()
+        kept_first_unc = False
+        deduped: list = []
+        for u in units:
+            if u.type in ("uncertainty", "hedge"):
+                norm = _normalize_unc_content(u.content)
+                if not norm or norm in seen_unc:
+                    continue
+                if kept_first_unc:
+                    continue
+                seen_unc.add(norm)
+                kept_first_unc = True
+            deduped.append(u)
+        units = deduped
+
         sentences: list[str] = []
         prev_type = ""
 
@@ -144,6 +181,10 @@ class SemanticRealizer:
 
         # Post-process: inject voice vocabulary selectively
         text = self._modulate_voice(text, utterance_plan)
+
+        # Belt-and-braces: strip any "confidence level: 0.XX — answer may be
+        # incomplete" literal that survived dedupe (e.g. embedded in a larger unit).
+        text = _CONF_NUMERIC_RE.sub("my memory on this topic may be incomplete", text)
 
         return text.strip()
 
@@ -182,6 +223,9 @@ class SemanticRealizer:
             return f"{tr}{c}" if tr else c
 
         if t == "property":
+            sense_sent = realize_sense_frame(unit, speech_act=speech_act)
+            if sense_sent:
+                return f"{tr}{sense_sent}" if tr else sense_sent
             if prev_type in ("definition", "nature"):
                 return f"{tr}{c}" if tr else c
             return c
@@ -190,6 +234,9 @@ class SemanticRealizer:
             return f"{tr}{c}" if tr else c
 
         if t == "distinction":
+            sense_sent = realize_sense_frame(unit, speech_act=speech_act)
+            if sense_sent:
+                return f"{tr}{sense_sent}" if tr else sense_sent
             return f"{tr}{c}" if tr else c
 
         if t == "diagnosis":
@@ -318,6 +365,75 @@ class SemanticRealizer:
         return text
 
 
+# ── Sense-frame realization ───────────────────────────────────────────────────
+
+def realize_sense_frame(unit: MeaningUnit, speech_act: str = "") -> str | None:
+    """
+    Convert sense-frame enrichment units into natural surface language.
+
+    Handles three content patterns set by utterance_planner._enrich_with_sense_frames:
+      1. "In {domain}: {gloss}."           — domain-scoped property
+      2. "'{word}' differs by domain — in {d1}: {g1}; in {d2}: {g2}." — contrast
+      3. "Did you mean '{word}' as in '...', or more as '...'?"        — polysemy follow_up
+
+    Hard rule: only rephrases content already in unit.content — adds no new claims.
+    Returns None if the content does not match a sense-frame pattern.
+    """
+    c = unit.content.strip()
+
+    # ── Pattern 1: Domain-scoped property ─────────────────────────────────────
+    m = _DOMAIN_SCOPE_RE.match(c)
+    if m and unit.type == "property":
+        domain = m.group(1).strip()
+        gloss  = m.group(2).strip().rstrip(".")
+        _emit_realizer_trace(pattern="domain_scope", domain=domain, gloss=gloss)
+        return f"In {domain}, this refers to {gloss[0].lower()}{gloss[1:]}."
+
+    # ── Pattern 2: Cross-domain contrast ──────────────────────────────────────
+    m = _DOMAIN_CONTRAST_RE.match(c)
+    if m and unit.type == "distinction":
+        word = m.group(1)
+        d1, g1 = m.group(2).strip(), m.group(3).strip().rstrip(".")
+        d2, g2 = m.group(4).strip(), m.group(5).strip().rstrip(".")
+        _emit_realizer_trace(pattern="cross_domain_contrast", domain=f"{d1}/{d2}", gloss=g1[:60])
+        return (
+            f"'{word}' carries different meaning depending on context. "
+            f"In {d1} it refers to {g1[0].lower()}{g1[1:]}; "
+            f"in {d2} it means {g2[0].lower()}{g2[1:]}."
+        )
+
+    # ── Pattern 3: Polysemy follow_up ─────────────────────────────────────────
+    if unit.type == "follow_up" and c.startswith("Did you mean"):
+        _emit_realizer_trace(pattern="polysemy_followup", domain="", gloss=c[:60])
+        return c if c.endswith("?") else c + "?"
+
+    return None
+
+
+def _emit_realizer_trace(pattern: str, domain: str, gloss: str) -> None:
+    """Emit a realization-layer trace. No-ops when audit disabled."""
+    try:
+        from lexical_cognition.sense_audit import write_trace, SenseChoiceTrace, is_enabled
+        if not is_enabled():
+            return
+        trace = SenseChoiceTrace(
+            query="",
+            focus_term="",
+            active_domain=domain or None,
+            domain_hints=[domain] if domain else [],
+            chosen_sense_id="",
+            chosen_gloss=gloss,
+            chosen_domain=domain or None,
+            rejected_senses=[],
+            reason=pattern,
+            confidence=1.0,
+            source_layer="semantic_realizer",
+        )
+        write_trace(trace)
+    except Exception:
+        pass
+
+
 # ── Transition phrases ────────────────────────────────────────────────────────
 # These are semantic connectors — not generic filler.
 # They encode the RELATIONSHIP between consecutive meaning types.
@@ -343,6 +459,12 @@ _TRANSITIONS: dict[tuple[str, str], str] = {
     ("distinction", "proposal"):          "Given this distinction: ",
     ("agreement", "distinction"):         "That said: ",
     ("agreement", "proposal"):            "Building on that: ",
+    # Sense-frame enrichment transitions
+    ("definition", "distinction"):        "Worth noting: ",
+    ("property",   "distinction"):        "Across domains: ",
+    ("distinction", "follow_up"):         "",
+    ("property",   "follow_up"):          "",
+    ("definition", "follow_up"):          "",
 }
 
 def _transition(prev: str, curr: str) -> str:

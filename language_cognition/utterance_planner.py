@@ -17,6 +17,7 @@ explicit pragmatic instructions, not just raw facts.
 """
 
 from __future__ import annotations
+import re
 from dataclasses import dataclass, field
 from .discourse_state import DiscourseState
 
@@ -79,6 +80,7 @@ class UtterancePlan:
     uncertainty_level:    float = 0.0
     emotional_tone:       str   = "composed"
     next_turn_affordance: str   = "wait"   # wait / ask / act / think
+    sense_frames:         dict  = field(default_factory=dict)  # word → [SenseHint]
 
     def required_units(self) -> list[MeaningUnit]:
         return [u for u in self.meaning_units if u.must_include]
@@ -104,6 +106,9 @@ class UtterancePlan:
             f"STANCE: {self.stance}  TONE: {self.emotional_tone}  UNCERTAINTY: {self.uncertainty_level:.2f}",
             f"RESPONSE GOAL: {self.discourse_state.response_goal}",
         ]
+        domain = self.discourse_state.active_domain or self.discourse_state.persistent_domain
+        if domain:
+            lines.append(f"DOMAIN: {domain}")
         if self.discourse_state.must_not:
             lines.append("MUST NOT: " + " | ".join(self.discourse_state.must_not))
         lines.append("")
@@ -124,9 +129,13 @@ def plan_utterance(
     speech_act: str,
     response_plan,           # cognitive_operators.response_planner.ResponsePlan
     discourse_state: DiscourseState,
+    sense_frames: dict | None = None,
 ) -> UtterancePlan:
     """
     Decompose ResponsePlan into ordered MeaningUnits for the given speech act.
+    sense_frames: dict[word → list[SenseHint]] from LexicalAnalysis — enriches
+    definition/nature units with domain scoping, contrast, and polysemy notices.
+    Explicit operator output always takes precedence over lexical enrichment.
     """
     out = response_plan.operator_output or {}
     op  = response_plan.operator_used or ""
@@ -138,6 +147,7 @@ def plan_utterance(
         uncertainty_level=_derive_uncertainty_level(response_plan),
         emotional_tone=_derive_emotional_tone(discourse_state),
         next_turn_affordance=_derive_next_turn(speech_act, discourse_state),
+        sense_frames=sense_frames or {},
     )
 
     # Dispatch to operator-specific planners
@@ -172,6 +182,11 @@ def plan_utterance(
             salience=0.6,
             must_include=True,
         ))
+
+    # Sense-frame enrichment: domain scoping, contrast, polysemy notice
+    # Runs after operator planners so it only supplements, never overrides.
+    if sense_frames:
+        _enrich_with_sense_frames(plan, sense_frames, discourse_state, response_plan)
 
     # Remove empty units
     plan.meaning_units = [u for u in plan.meaning_units if not u.is_empty()]
@@ -332,15 +347,30 @@ def _plan_compare(plan: UtterancePlan, out: dict) -> None:
         ))
     for f in (out.get("shared") or [])[:3]:
         if isinstance(f, dict):
-            plan.meaning_units.append(MeaningUnit(
-                type="relation", content=f"shared: {f.get('predicate')} {f.get('value')}", salience=0.6,
-            ))
+            pred = f.get("predicate", "").replace("_", " ").strip()
+            val  = f.get("value", "").replace("_", " ").strip()
+            if pred and val:
+                plan.meaning_units.append(MeaningUnit(
+                    type="relation", content=f"Both relate to {val} ({pred}).", salience=0.6,
+                ))
     for f in (out.get("only_a") or [])[:2]:
         if isinstance(f, dict):
-            plan.meaning_units.append(MeaningUnit(
-                type="distinction", content=f"only {a}: {f.get('predicate')} {f.get('value')}", salience=0.55,
-            ))
+            pred = f.get("predicate", "").replace("_", " ").strip()
+            val  = f.get("value", "").replace("_", " ").strip()
+            if pred and val and a:
+                plan.meaning_units.append(MeaningUnit(
+                    type="distinction", content=f"{a} uniquely {pred} {val}.", salience=0.55,
+                ))
 
+
+_RAW_SCHEMA_PATTERNS = (
+    "confidence:", "category:", "shared:", "related_to", "↔", "_linnarssonia_",
+    "_kutorgina_", "similarity=", "predicate:", "anchor_id:", "no_memory",
+)
+
+def _is_raw_schema(s: str) -> bool:
+    sl = s.lower()
+    return any(p in sl for p in _RAW_SCHEMA_PATTERNS)
 
 def _plan_uncertain(plan: UtterancePlan, response_plan) -> None:
     plan.meaning_units.append(MeaningUnit(
@@ -349,12 +379,174 @@ def _plan_uncertain(plan: UtterancePlan, response_plan) -> None:
         salience=1.0, must_include=True,
     ))
     for u in (getattr(response_plan, "uncertainties", []) or [])[:2]:
-        plan.meaning_units.append(MeaningUnit(type="uncertainty", content=str(u), salience=0.6))
+        s = str(u)
+        if not _is_raw_schema(s):
+            plan.meaning_units.append(MeaningUnit(type="uncertainty", content=s, salience=0.6))
 
 
 def _plan_generic(plan: UtterancePlan, response_plan) -> None:
     for c in (getattr(response_plan, "claims", []) or [])[:5]:
         plan.meaning_units.append(MeaningUnit(type="property", content=str(c), salience=0.6))
+
+
+# ── Sense-frame enrichment ────────────────────────────────────────────────────
+
+# Acts where we must NOT inject lexical enrichment — content is authoritative
+_NO_ENRICH_TYPES = frozenset({"identity_marker", "correction", "diagnosis", "uncertainty", "warning"})
+
+# Query phrases that already disambiguate the domain — no clarification needed
+_DISAMBIG_PHRASES = re.compile(
+    r'\b(in (linguistics|computing|programming|computer science|mathematics|physics|medicine|psychology|philosophy|biology|music|law|finance|economics|chemistry|engineering|ordinary|common|everyday|this context|this project))\b',
+    re.I,
+)
+
+
+def _choose_sense_by_domain(hints: list, active_domain: str | None) -> tuple:
+    """
+    Return (SenseHint, reason_str) for the hint that best matches active_domain.
+    reason_str: exact_match / alias_match / substring_match / primary_fallback / no_domain
+    Falls back to primary (first) hint only when no domain match exists.
+    """
+    if not hints:
+        return None, "no_hints"
+    if not active_domain:
+        return hints[0], "no_domain"
+    ad = active_domain.lower()
+    # Exact match
+    for h in hints:
+        if h.domain and h.domain.lower() == ad:
+            return h, "exact_match"
+    # Partial containment ("computer science" ↔ "computing", "economics" ↔ "finance")
+    _DOMAIN_ALIASES = {
+        "economics": ["finance", "financial", "economic"],
+        "computer science": ["computing", "programming", "software"],
+        "linguistics": ["language", "phonology", "syntax", "morphology"],
+        "medicine": ["medical", "clinical", "pharmacology"],
+    }
+    for canonical, aliases in _DOMAIN_ALIASES.items():
+        if ad == canonical or ad in aliases:
+            for h in hints:
+                if h.domain and (h.domain.lower() == canonical
+                                 or h.domain.lower() in aliases):
+                    return h, "alias_match"
+    # Substring match
+    for h in hints:
+        if h.domain and (ad in h.domain.lower() or h.domain.lower() in ad):
+            return h, "substring_match"
+    return hints[0], "primary_fallback"
+
+
+# Words that appear in questions but are not the semantic focus
+_QUERY_STRUCTURE_WORDS = frozenset({
+    "difference", "differences", "meaning", "meanings", "definition", "definitions",
+    "kind", "kinds", "type", "types", "sort", "sorts", "way", "ways", "thing", "things",
+    "aspect", "aspects", "sense", "senses", "example", "examples", "concept", "concepts",
+    "term", "terms", "word", "words", "between", "among", "versus", "compare",
+})
+
+
+def _enrich_with_sense_frames(
+    plan: UtterancePlan,
+    sense_frames: dict,
+    state: DiscourseState,
+    response_plan,
+) -> None:
+    """
+    Post-operator enrichment using OEWN sense data.
+
+    Guards:
+      - Speech act is RECALL, CORRECT, REFUSE, REASSURE, WARN → skip all enrichment
+      - User already disambiguated ("in linguistics" etc.) → skip polysemy follow_up only
+        (domain framing and contrast still fire — they're informative, not redundant)
+
+    What this adds:
+      1. Domain-scoped definition — if active_domain known, annotate domain-matched sense
+      2. Cross-domain contrast — if key term has senses in ≥2 distinct domains
+      3. Polysemy follow-up — if high polysemy AND no established domain AND low confidence
+    """
+    if not sense_frames:
+        return
+    if plan.speech_act in ("RECALL", "CORRECT", "REFUSE", "REASSURE"):
+        return
+
+    query_text = state.topic + " " + state.response_goal
+    user_disambiguated = bool(_DISAMBIG_PHRASES.search(query_text))
+
+    confidence = getattr(response_plan, "confidence", 0.5)
+    active_domain = state.active_domain or state.persistent_domain
+
+    # Pick the most sense-rich content term as focus, excluding query-structure words
+    candidates = {w: h for w, h in sense_frames.items()
+                  if w.lower() not in _QUERY_STRUCTURE_WORDS}
+    if not candidates:
+        candidates = sense_frames
+    focus_word, focus_hints = max(
+        candidates.items(), key=lambda kv: len(kv[1]), default=(None, [])
+    )
+    if not focus_word or not focus_hints:
+        return
+
+    # ── 1. Domain-scoped definition ───────────────────────────────────────────
+    # Use domain-aware sense selection — primary sense may not match active_domain.
+    has_definition = any(u.type in ("definition", "nature") for u in plan.meaning_units
+                         if u.type not in _NO_ENRICH_TYPES)
+    if active_domain and has_definition:
+        best, reason = _choose_sense_by_domain(focus_hints, active_domain)
+        if best and best.gloss:
+            domain_gloss = best.gloss.rstrip(".")
+            plan.meaning_units.append(MeaningUnit(
+                type="property",
+                content=f"In {active_domain}: {domain_gloss}.",
+                salience=0.72,
+                stance="direct",
+            ))
+            _emit_sense_trace(
+                query=state.topic or "",
+                focus_term=focus_word,
+                active_domain=active_domain,
+                hints=focus_hints,
+                chosen=best,
+                reason=reason,
+                confidence=confidence,
+                source_layer="utterance_planner.step1",
+            )
+
+    # ── 2. Cross-domain contrast ──────────────────────────────────────────────
+    # Add a distinction unit when top senses have different explicit domains.
+    # Requires both domains to be non-null to avoid "ordinary vs X" noise.
+    if len(focus_hints) >= 2:
+        d1 = focus_hints[0].domain
+        d2 = next((h.domain for h in focus_hints[1:] if h.domain and h.domain != d1), None)
+        if d1 and d2:
+            g1 = focus_hints[0].gloss.rstrip(".")[:100]
+            g2 = next(h.gloss for h in focus_hints[1:] if h.domain == d2).rstrip(".")[:100]
+            plan.meaning_units.append(MeaningUnit(
+                type="distinction",
+                content=f"'{focus_word}' differs by domain — in {d1}: {g1}; in {d2}: {g2}.",
+                salience=0.60,
+                stance="direct",
+            ))
+
+    # ── 3. Polysemy follow-up ─────────────────────────────────────────────────
+    # Offer clarification only when: polysemy is high, no domain is established,
+    # confidence is not strong, and query is genuinely ambiguous.
+    avg_polysemy = sum(len(v) for v in sense_frames.values()) / len(sense_frames)
+    if (avg_polysemy >= 4
+            and not active_domain
+            and not user_disambiguated
+            and confidence < 0.65
+            and plan.speech_act in ("DEFINE", "CLARIFY", "ASSERT")
+            and not any(u.type == "follow_up" for u in plan.meaning_units)):
+        gloss_a = focus_hints[0].gloss[:80].rstrip(".")
+        gloss_b = focus_hints[1].gloss[:80].rstrip(".") if len(focus_hints) > 1 else ""
+        if gloss_b and gloss_a != gloss_b:
+            plan.meaning_units.append(MeaningUnit(
+                type="follow_up",
+                content=f"Did you mean '{focus_word}' as in '{gloss_a}', or more as '{gloss_b}'?",
+                salience=0.50,
+                stance="direct",
+            ))
+        plan.next_turn_affordance = "answer"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -403,8 +595,42 @@ def _derive_next_turn(speech_act: str, state: DiscourseState) -> str:
 
 
 def _format_uncertainty(plan) -> str:
-    conf = getattr(plan, "confidence", 0.5)
     uncertainties = getattr(plan, "uncertainties", []) or []
     if uncertainties:
         return "; ".join(str(u) for u in uncertainties[:2])
-    return f"confidence level: {conf:.2f} — answer may be incomplete"
+    return "my memory on this topic may be incomplete"
+
+
+def _emit_sense_trace(
+    query: str,
+    focus_term: str,
+    active_domain: str | None,
+    hints: list,
+    chosen,
+    reason: str,
+    confidence: float,
+    source_layer: str,
+) -> None:
+    """Emit a sense-choice trace to the audit log. No-ops when audit disabled."""
+    try:
+        from lexical_cognition.sense_audit import (
+            write_trace, make_rejected_senses, SenseChoiceTrace, is_enabled
+        )
+        if not is_enabled():
+            return
+        trace = SenseChoiceTrace(
+            query=query,
+            focus_term=focus_term,
+            active_domain=active_domain,
+            domain_hints=[h.domain for h in hints if h.domain],
+            chosen_sense_id=getattr(chosen, "sense_id", "") or "",
+            chosen_gloss=getattr(chosen, "gloss", "") or "",
+            chosen_domain=getattr(chosen, "domain", None),
+            rejected_senses=make_rejected_senses(hints, chosen, reason),
+            reason=reason,
+            confidence=confidence,
+            source_layer=source_layer,
+        )
+        write_trace(trace)
+    except Exception:
+        pass  # audit must never crash the pipeline

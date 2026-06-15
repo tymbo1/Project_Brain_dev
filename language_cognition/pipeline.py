@@ -28,7 +28,7 @@ Usage (no-LLM path):
 from __future__ import annotations
 from dataclasses import dataclass
 
-from .discourse_state  import DiscourseState, infer_discourse_state
+from .discourse_state  import DiscourseState, infer_discourse_state, _derive_response_goal_with_state
 from .speech_acts      import select_speech_act, rank_speech_acts
 from .utterance_planner import UtterancePlan, plan_utterance
 from .repair_engine    import RepairEngine
@@ -86,6 +86,7 @@ def run_language_cognition(
     response_plan,               # cognitive_operators.response_planner.ResponsePlan
     history: list[dict] | None = None,
     voice: VoiceProfile | None = None,
+    domain_trail: list[str] | None = None,
 ) -> LanguageCognitionResult:
     """
     Execute the full Language Cognition pipeline.
@@ -102,6 +103,7 @@ def run_language_cognition(
         query=query,
         history=history,
         operator_output=op_output,
+        domain_trail=domain_trail,
     )
 
     # ── 1b. Pragmatic Inference ───────────────────────────────────────────────
@@ -112,6 +114,15 @@ def run_language_cognition(
                 prior_text = turn.get("content", "")
                 break
     pragma = pragmatic_interpret(query, state, prior_assistant_text=prior_text)
+
+    # Domain continuity: pragma carries dominant_domain from LexicalAnalysis.
+    # Update state after pragma so response_goal and constraints are domain-aware.
+    if pragma.dominant_domain:
+        state.active_domain = pragma.dominant_domain
+        trail = list(state.domain_trail)
+        trail.append(pragma.dominant_domain)
+        state.domain_trail = trail[-10:]
+        state.response_goal = _derive_response_goal_with_state(state)
 
     # Pragmatic inference can override discourse state constraints
     if pragma.must_not:
@@ -129,18 +140,52 @@ def run_language_cognition(
                    "AGREE", "DISAGREE", "MARK_UNCERTAINTY", "DIAGNOSE"}
     _VAGUE_INTENTS = {"understand", "ambiguous_reference", ""}
 
+    # Zero-chain affordance fallback: when the substrate yielded no claims,
+    # DEFINE is structurally wrong — there is nothing to define. Route to
+    # REASSURE / PLAN / ASK_FOLLOWUP based on affective and action cues.
+    # Must run BEFORE the pragma.pragmatic_act override because surface forms
+    # ("Tell me a story", "How do I...") otherwise pick DEFINE on empty substrate.
+    has_claims = bool(getattr(response_plan, "claims", None))
+    emo_signal = (getattr(pragma, "emotional_signal", "") or "neutral").lower()
+    emo_present = emo_signal not in ("", "neutral", "analytic")
+    ql = query.lower()
+    surface_emo = any(w in ql for w in (
+        "i feel", "i'm feeling", "lonely", "alone ", "lost ", "afraid",
+        "scared", "anxious", "hurts", "the pain", "grief", "i miss ",
+        "depressed", "overwhelm", "struggling", "broken", "ashamed",
+    ))
+    surface_action = any(w in ql for w in (
+        "how do i", "how can i", "help me", "what should i",
+        "guide me", "walk me through", "show me how", "rebuild",
+        "build a plan", "steps", "give me advice", "advise me",
+    ))
     forced_act = pragma.overrides_speech_act()
+
     if forced_act:
         speech_act = forced_act
+    elif not has_claims:
+        if state.implied_need == "action" or surface_action:
+            speech_act = "PLAN"
+        elif surface_emo or emo_present or state.emotional_pressure > 0.5:
+            speech_act = "REASSURE"
+        else:
+            # Empty substrate + no affective signal: ask, don't fabricate-define.
+            speech_act = "ASK_FOLLOWUP"
     elif (pragma.pragmatic_act in _KNOWN_ACTS
           and pragma.inferred_intent not in _VAGUE_INTENTS):
         # Pragmatic inference is specific — trust it over scoring
         speech_act = pragma.pragmatic_act
     else:
-        speech_act = select_speech_act(query, response_plan, state)
+        speech_act = select_speech_act(
+            query, response_plan, state,
+            sense_frames=pragma.sense_frames if pragma else None,
+        )
 
     # ── 3. Utterance Planning ─────────────────────────────────────────────────
-    uplan = plan_utterance(speech_act, response_plan, state)
+    uplan = plan_utterance(
+        speech_act, response_plan, state,
+        sense_frames=pragma.sense_frames if pragma else None,
+    )
 
     # ── 4. Repair ─────────────────────────────────────────────────────────────
     uplan = _repair_engine.repair(uplan, response_plan)
