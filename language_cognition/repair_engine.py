@@ -40,13 +40,49 @@ class RepairEngine:
     # ── Repairs ───────────────────────────────────────────────────────────────
 
     def _repair_memory_gap(self, plan: UtterancePlan, rplan) -> None:
-        """If the plan has no substantive content, mark the gap honestly."""
+        """If the plan has no substantive content, mark the gap honestly.
+
+        Respects affective routing set upstream by pipeline.py zero-chain fallback:
+        REASSURE/PLAN/ASK_FOLLOWUP get stance-appropriate content units instead of
+        the generic MARK_UNCERTAINTY hedge.
+        """
         has_content = any(
             u.type not in ("uncertainty", "hedge", "follow_up", "emotional_tone")
             and not u.is_empty()
             for u in plan.meaning_units
         )
-        if not has_content:
+        if has_content:
+            return
+
+        act = getattr(plan, "speech_act", "") or ""
+        if act == "REASSURE":
+            plan.meaning_units.insert(0, MeaningUnit(
+                type="reassurance",
+                content="I hear you, and I'm sitting with what you're carrying. I don't have a fully-formed answer for this in memory — but I'm here.",
+                salience=1.0,
+                must_include=True,
+                stance="empathetic",
+            ))
+            plan.next_turn_affordance = "invite"
+        elif act == "PLAN":
+            plan.meaning_units.insert(0, MeaningUnit(
+                type="proposal",
+                content="I don't have a ready plan in memory for this yet, but I can help shape one with you.",
+                salience=1.0,
+                must_include=True,
+                stance="direct",
+            ))
+            plan.next_turn_affordance = "co_plan"
+        elif act == "ASK_FOLLOWUP":
+            plan.meaning_units.insert(0, MeaningUnit(
+                type="invitation",
+                content="I don't yet have a clear thread to pull on here.",
+                salience=1.0,
+                must_include=True,
+                stance="direct",
+            ))
+            plan.next_turn_affordance = "ask"
+        else:
             plan.meaning_units.insert(0, MeaningUnit(
                 type="uncertainty",
                 content="I don't have that in my memory right now. My substrate on this topic may not be populated yet.",
@@ -125,27 +161,36 @@ class RepairEngine:
         if has_followup:
             return
 
-        # Add follow-up for uncertain answers or first turn
-        if plan.speech_act in ("MARK_UNCERTAINTY",) or plan.discourse_state.depth == 0:
+        if plan.speech_act in ("MARK_UNCERTAINTY", "REASSURE", "PLAN", "ASK_FOLLOWUP") \
+           or plan.discourse_state.depth == 0:
             followup = _generate_followup(plan)
             if followup:
+                stance = "empathetic" if plan.speech_act in ("REASSURE", "MARK_UNCERTAINTY") else "direct"
                 plan.meaning_units.append(MeaningUnit(
                     type="follow_up",
                     content=followup,
                     salience=0.3,
                     must_include=False,
-                    stance="empathetic",
+                    stance=stance,
                 ))
-            plan.next_turn_affordance = "ask"
+            if not plan.next_turn_affordance:
+                plan.next_turn_affordance = "ask"
 
 
 def _generate_followup(plan: UtterancePlan) -> str:
-    """Generate a contextually appropriate follow-up cue."""
-    topic = plan.discourse_state.topic
-    if plan.speech_act == "MARK_UNCERTAINTY":
-        if topic:
-            return f"Is there something specific about {topic} you'd like to explore together?"
+    """Generate a stance-appropriate follow-up cue.
+
+    Avoids verbatim topic-echo of the user's prompt — that's realization noise.
+    """
+    act = plan.speech_act
+    if act == "REASSURE":
+        return "Tell me a little more about what's surfacing — I'd rather hear you than guess."
+    if act == "PLAN":
+        return "What's the first concrete piece you'd like to start with?"
+    if act == "ASK_FOLLOWUP":
+        return "What draws you to it — an image, a feeling, a question you're holding?"
+    if act == "MARK_UNCERTAINTY":
         return "Can you give me more context? That will help me search my memory more precisely."
     if plan.discourse_state.depth == 0:
-        return ""  # first turn — don't pepper with questions
+        return ""
     return ""
