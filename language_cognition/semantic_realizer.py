@@ -138,16 +138,26 @@ class SemanticRealizer:
         if not units:
             return "I don't have that in my memory right now."
 
-        # Dedupe uncertainty/hedge units. Two passes:
+        # Dedupe uncertainty/hedge units. Three passes:
         #  (a) normalized-content dedupe drops byte/case variants of the same hedge;
         #  (b) keep only the first uncertainty unit overall — operator pipeline +
         #      utterance planner each inject one and the result is a chain of
         #      near-redundant hedges that bury the actual claim.
+        #  (c) when an empty-substrate stance opener fired (reassurance / proposal /
+        #      invitation), suppress ALL uncertainty/hedge units — the stance opener
+        #      already carries the "I don't have an answer in memory" admission;
+        #      adding a generic hedge after it is redundant.
+        has_stance_opener = any(
+            u.type in ("reassurance", "proposal", "invitation")
+            for u in units
+        )
         seen_unc: set[str] = set()
         kept_first_unc = False
         deduped: list = []
         for u in units:
             if u.type in ("uncertainty", "hedge"):
+                if has_stance_opener:
+                    continue
                 norm = _normalize_unc_content(u.content)
                 if not norm or norm in seen_unc:
                     continue
