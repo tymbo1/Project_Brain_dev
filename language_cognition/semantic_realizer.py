@@ -19,6 +19,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 from .utterance_planner import UtterancePlan, MeaningUnit
+from .expression_hint import verbatim_leak as _verbatim_leak
 
 # Sense-frame content patterns (set by utterance_planner enrichment)
 _DOMAIN_SCOPE_RE  = re.compile(r'^In ([^:]{2,30}):\s*(.+)$', re.S)
@@ -195,6 +196,25 @@ class SemanticRealizer:
         # Belt-and-braces: strip any "confidence level: 0.XX — answer may be
         # incomplete" literal that survived dedupe (e.g. embedded in a larger unit).
         text = _CONF_NUMERIC_RE.sub("my memory on this topic may be incomplete", text)
+
+        # A′ verbatim-leak guard — record whether any banned 4-gram from the
+        # capsule pool surfaced. Capsules are stance substrate, not content;
+        # any leak is a contract violation. Hand-curated repair/fallback content
+        # is removed before scanning so the guard catches genuine copy-through,
+        # not coincidental overlap with our own openers/follow-ups/hedges.
+        hint = getattr(utterance_plan, "expression_hint", None)
+        try:
+            scan_text = text
+            _STRIP_TYPES = (
+                "reassurance", "proposal", "invitation",
+                "follow_up", "uncertainty", "hedge",
+            )
+            for u in utterance_plan.meaning_units:
+                if u.type in _STRIP_TYPES and u.content:
+                    scan_text = scan_text.replace(u.content, " ")
+            utterance_plan.verbatim_capsule_leak = bool(_verbatim_leak(scan_text, hint))
+        except Exception:
+            utterance_plan.verbatim_capsule_leak = False
 
         return text.strip()
 

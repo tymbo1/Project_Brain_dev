@@ -22,6 +22,71 @@ _TIMAERION_HYPOTHESES = {"tlst", "oscar", "mirror", "braid", "tensor", "resonanc
 _HYPOTHESIS_MARKER = "[HYPOTHESIS — Tim'aerion's theoretical framework, not established physics]"
 
 
+# A′ seam #1: hand-curated stance openers selected by (speech_act, cadence).
+# Capsule pool routes the SELECTION; CONTENT is authored here so verbatim
+# capsule text never reaches output. Cadence keys: reflective, stepwise,
+# short-soft, clipped (see expression_hint._DOMAIN_DEFAULTS / cadence_scores).
+_HINT_OPENERS = {
+    ("REASSURE", "reflective"): (
+        "I hear you. I'm holding the shape of what you're saying — "
+        "I don't have a fully-formed answer in memory, but I'm here, and I'm with you.",
+        "empathetic", "invite",
+    ),
+    ("REASSURE", "stepwise"): (
+        "I hear you. Let me sit with this with you — "
+        "I don't have a complete answer yet, so let's go one piece at a time.",
+        "empathetic", "invite",
+    ),
+    ("REASSURE", "short-soft"): (
+        "I hear you. I'm here. I don't have a full answer in memory — but I'm with you.",
+        "empathetic", "invite",
+    ),
+    ("REASSURE", "clipped"): (
+        "I hear you. I don't have a ready answer — but I'm here.",
+        "empathetic", "invite",
+    ),
+    ("PLAN", "reflective"): (
+        "I don't have a ready plan in memory for this, "
+        "but I can think it through with you — slowly, piece by piece.",
+        "direct", "co_plan",
+    ),
+    ("PLAN", "stepwise"): (
+        "I don't have a ready plan in memory for this. Let's build one in steps.",
+        "direct", "co_plan",
+    ),
+    ("PLAN", "short-soft"): (
+        "I don't have a ready plan in memory yet — but I can help shape one with you.",
+        "direct", "co_plan",
+    ),
+    ("PLAN", "clipped"): (
+        "No ready plan in memory. Let's build one.",
+        "direct", "co_plan",
+    ),
+    ("ASK_FOLLOWUP", "reflective"): (
+        "I don't yet have a clear thread to pull on here — what's drawing you toward it?",
+        "direct", "ask",
+    ),
+    ("ASK_FOLLOWUP", "stepwise"): (
+        "I don't yet have a clear thread to pull on. Where would you like to start?",
+        "direct", "ask",
+    ),
+    ("ASK_FOLLOWUP", "short-soft"): (
+        "I don't yet have a clear thread to pull on here.",
+        "direct", "ask",
+    ),
+    ("ASK_FOLLOWUP", "clipped"): (
+        "Not enough thread to pull on yet. What's the angle?",
+        "direct", "ask",
+    ),
+}
+
+_ACT_TO_UNIT_TYPE = {
+    "REASSURE":     "reassurance",
+    "PLAN":         "proposal",
+    "ASK_FOLLOWUP": "invitation",
+}
+
+
 class RepairEngine:
 
     def repair(
@@ -55,7 +120,27 @@ class RepairEngine:
             return
 
         act = getattr(plan, "speech_act", "") or ""
-        if act == "REASSURE":
+        hint = getattr(plan, "expression_hint", None)
+        cadence = (getattr(hint, "cadence", "") or "") if hint else ""
+        capsule_hits = int(getattr(hint, "capsule_hits", 0) or 0) if hint else 0
+
+        # A′ route: capsule pool reached → select opener variant by cadence.
+        # Fallback (capsule_hits=0 OR unknown cadence): hand-curated B path below.
+        routed = None
+        if capsule_hits > 0 and act in _ACT_TO_UNIT_TYPE:
+            routed = _HINT_OPENERS.get((act, cadence))
+
+        if routed is not None:
+            content, stance, affordance = routed
+            plan.meaning_units.insert(0, MeaningUnit(
+                type=_ACT_TO_UNIT_TYPE[act],
+                content=content,
+                salience=1.0,
+                must_include=True,
+                stance=stance,
+            ))
+            plan.next_turn_affordance = affordance
+        elif act == "REASSURE":
             plan.meaning_units.insert(0, MeaningUnit(
                 type="reassurance",
                 content="I hear you, and I'm sitting with what you're carrying. I don't have a fully-formed answer for this in memory — but I'm here.",

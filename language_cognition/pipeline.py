@@ -34,6 +34,12 @@ from .utterance_planner import UtterancePlan, plan_utterance
 from .repair_engine    import RepairEngine
 from .semantic_realizer import SemanticRealizer, VoiceProfile, load_voice_profile
 from .pragmatics       import PragmaticReading, interpret as pragmatic_interpret
+from .expression_hint  import extract_hint as _extract_expression_hint
+
+try:
+    from langeng_bridge import infer_expression_domain as _infer_expression_domain
+except Exception:
+    _infer_expression_domain = None  # type: ignore
 
 _repair_engine = RepairEngine()
 
@@ -186,6 +192,21 @@ def run_language_cognition(
         speech_act, response_plan, state,
         sense_frames=pragma.sense_frames if pragma else None,
     )
+
+    # ── 3b. Expression hint (A′ seam #1) ──────────────────────────────────────
+    # Pull deterministic stance/cadence features from the 518 language_expression
+    # capsules. Capsules influence stance/cadence/warmth/playfulness only —
+    # they MUST NOT supply factual content or verbatim text. The realizer
+    # enforces this with a verbatim-leak guard.
+    expr_domain = ""
+    if _infer_expression_domain is not None:
+        try:
+            d = _infer_expression_domain(query)
+            if isinstance(d, str):
+                expr_domain = d
+        except Exception:
+            expr_domain = ""
+    uplan.expression_hint = _extract_expression_hint(expr_domain, speech_act)
 
     # ── 4. Repair ─────────────────────────────────────────────────────────────
     uplan = _repair_engine.repair(uplan, response_plan)

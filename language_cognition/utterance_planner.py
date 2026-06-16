@@ -81,6 +81,7 @@ class UtterancePlan:
     emotional_tone:       str   = "composed"
     next_turn_affordance: str   = "wait"   # wait / ask / act / think
     sense_frames:         dict  = field(default_factory=dict)  # word → [SenseHint]
+    expression_hint:      "ExpressionHint | None" = None  # A′ seam #1: capsule-derived stance/cadence features
 
     def required_units(self) -> list[MeaningUnit]:
         return [u for u in self.meaning_units if u.must_include]

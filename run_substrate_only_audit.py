@@ -67,11 +67,24 @@ def main() -> int:
 
             try:
                 lc = run_language_cognition(query=q, response_plan=plan)
+                hint = getattr(lc.plan, "expression_hint", None)
+                leak = bool(getattr(lc.plan, "verbatim_capsule_leak", False))
                 print(f"\n--- LC_PLAN ---")
                 print(f"  speech_act:    {lc.speech_act}")
                 print(f"  stance:        {lc.plan.stance}")
                 print(f"  meaning_units: {len(lc.plan.meaning_units)}")
                 print(f"  confidence:    {lc.confidence:.3f}")
+                if hint is not None:
+                    print(f"\n--- EXPRESSION_HINT ---")
+                    print(f"  domain:           {hint.domain or '(none)'}")
+                    print(f"  capsule_hits:     {hint.capsule_hits}")
+                    print(f"  hint_stance:      {hint.stance or '(none)'}")
+                    print(f"  hint_cadence:     {hint.cadence or '(none)'}")
+                    print(f"  warmth/direct/play: "
+                          f"{hint.warmth:.2f}/{hint.directness:.2f}/{hint.playfulness:.2f}")
+                    print(f"  allow_question:   {hint.allow_question}")
+                    print(f"  banned_ngrams:    {len(hint.banned_surface_ngrams)}")
+                    print(f"  verbatim_leak:    {leak}")
                 print(f"\n--- LC_TEXT (no-LLM realized) ---")
                 print(lc.text if lc.text else "(empty)")
             except Exception as e:
