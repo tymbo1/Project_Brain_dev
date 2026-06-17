@@ -86,6 +86,12 @@ _INTENT_PATTERNS: dict[str, list[re.Pattern]] = {
     ],
     "ASK_FOLLOWUP": [
         re.compile(r'\b(what do you think|your opinion|which would you|should i)\b', re.I),
+        # Humour intent — route playful requests via invitation rather than PLAN.
+        # The cog operator pipeline lacks a PLAY act; ASK_FOLLOWUP carries the
+        # closest stance-opener (invitation) and the realizer already routes
+        # invitation units cleanly. Paired with a playful-stance opener in
+        # repair_engine._repair_memory_gap so qwen's seed carries register markers.
+        re.compile(r'\b(funny|joke|laugh|silly|playful|haha|amus(e|ing)|comic|punchline|chuckle|tease)\b', re.I),
     ],
 }
 

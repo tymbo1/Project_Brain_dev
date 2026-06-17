@@ -86,6 +86,14 @@ _ACT_TO_UNIT_TYPE = {
     "ASK_FOLLOWUP": "invitation",
 }
 
+# Playful stance opener — humour-routing override (see _repair_memory_gap).
+# Lives at module scope so the capsule-reachability canary can match against it
+# as a recognized routed-opener variant (parallel to _HINT_OPENERS).
+_PLAYFUL_OPENER = (
+    "Ha — playful mode. I don't have a joke loaded, but here's a silly riff: "
+    "set me up and I'll swing."
+)
+
 
 class RepairEngine:
 
@@ -111,6 +119,38 @@ class RepairEngine:
         REASSURE/PLAN/ASK_FOLLOWUP get stance-appropriate content units instead of
         the generic MARK_UNCERTAINTY hedge.
         """
+        act = getattr(plan, "speech_act", "") or ""
+        hint = getattr(plan, "expression_hint", None)
+        cadence = (getattr(hint, "cadence", "") or "") if hint else ""
+        stance  = (getattr(hint, "stance", "")  or "") if hint else ""
+        capsule_hits = int(getattr(hint, "capsule_hits", 0) or 0) if hint else 0
+
+        # Humour override (runs BEFORE has_content gate): playful stance routed
+        # to a non-humour speech act produces joke-as-PLAN ("No ready plan in
+        # memory") which strips all play-register markers from the seed text
+        # and qwen mirrors that flatness. Even when substrate produces stray
+        # contamination ("category: supreme art"), the playful frame still
+        # belongs at the top. Emit a playful invitation that carries explicit
+        # humour register markers, drop noise substrate units (they overwhelm
+        # the playful frame), and re-route speech_act so the PLAN/DEFINE
+        # assembler doesn't append numbered-step scaffolds.
+        if stance == "playful" and act in ("PLAN", "ASK_FOLLOWUP", "DEFINE", "ASSERT"):
+            plan.meaning_units = [
+                u for u in plan.meaning_units
+                if u.type not in ("property", "definition", "nature", "relation",
+                                  "distinction", "summary_point", "uncertainty", "hedge")
+            ]
+            plan.meaning_units.insert(0, MeaningUnit(
+                type="invitation",
+                content=_PLAYFUL_OPENER,
+                salience=1.0,
+                must_include=True,
+                stance="playful",
+            ))
+            plan.speech_act = "ASK_FOLLOWUP"
+            plan.next_turn_affordance = "play_along"
+            return
+
         has_content = any(
             u.type not in ("uncertainty", "hedge", "follow_up", "emotional_tone")
             and not u.is_empty()
@@ -119,10 +159,6 @@ class RepairEngine:
         if has_content:
             return
 
-        act = getattr(plan, "speech_act", "") or ""
-        hint = getattr(plan, "expression_hint", None)
-        cadence = (getattr(hint, "cadence", "") or "") if hint else ""
-        capsule_hits = int(getattr(hint, "capsule_hits", 0) or 0) if hint else 0
 
         # A′ route: capsule pool reached → select opener variant by cadence.
         # Fallback (capsule_hits=0 OR unknown cadence): hand-curated B path below.

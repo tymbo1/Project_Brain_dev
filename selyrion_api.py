@@ -1233,6 +1233,17 @@ async def chat(req: ChatRequest, x_admin_token: Optional[str] = Header(default=N
                     "TONE EXEMPLARS (do not copy verbatim — draw stance and cadence only):\n"
                     + "\n".join(f"• {e}" for e in _exemplars)
                 )
+                # Humour-lightness explicit register directive: clean joke
+                # templates miss play-register markers and the user feels
+                # tonally flat. Push qwen to surface playful register words.
+                if _expr_domain == "humour_lightness":
+                    _tone_exemplars_block += (
+                        "\n\nREGISTER DIRECTIVE: humour mode. Use playful register "
+                        "vocabulary in your reply — words like 'haha', 'silly', "
+                        "'playful', 'amusing', 'absurd', 'joke', or 'punchline' — "
+                        "so the user feels the tone, not just receives a flat "
+                        "joke template."
+                    )
                 print(f"[tone_exemplars] domain={_expr_domain} picked={len(_exemplars)}")
             else:
                 print(f"[tone_exemplars] domain={_expr_domain} picked=0")

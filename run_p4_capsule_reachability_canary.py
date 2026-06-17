@@ -91,7 +91,7 @@ def _empty_response_plan():
 
 def _run_case(case: dict) -> dict:
     from language_cognition.pipeline import run_language_cognition
-    from language_cognition.repair_engine import _HINT_OPENERS
+    from language_cognition.repair_engine import _HINT_OPENERS, _PLAYFUL_OPENER
 
     rplan = _empty_response_plan()
     lc = run_language_cognition(query=case["prompt"], response_plan=rplan)
@@ -118,12 +118,18 @@ def _run_case(case: dict) -> dict:
     )
 
     if hint_present and hint.capsule_hits > 0 and opener_emitted:
-        key = (lc.speech_act, hint.cadence)
-        routed_tuple = _HINT_OPENERS.get(key)
-        opener_routed = bool(
-            routed_tuple is not None
-            and first.content.strip() == routed_tuple[0].strip()
-        )
+        # Playful stance is routed via _PLAYFUL_OPENER (humour override in
+        # repair_engine._repair_memory_gap) — parallel to the _HINT_OPENERS
+        # table, satisfies the "no inlined opener text" architectural rule.
+        if (getattr(first, "stance", "") or "") == "playful":
+            opener_routed = (first.content.strip() == _PLAYFUL_OPENER.strip())
+        else:
+            key = (lc.speech_act, hint.cadence)
+            routed_tuple = _HINT_OPENERS.get(key)
+            opener_routed = bool(
+                routed_tuple is not None
+                and first.content.strip() == routed_tuple[0].strip()
+            )
     else:
         opener_routed = True
 
