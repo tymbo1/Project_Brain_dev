@@ -41,6 +41,49 @@ try:
 except Exception:
     _infer_expression_domain = None  # type: ignore
 
+import re as _re
+
+_QECHO_PUNCT_RE = _re.compile(r"[^\w\s]")
+_QECHO_WS_RE = _re.compile(r"\s+")
+_QECHO_SAFE_TYPES = frozenset({
+    "property", "nature", "relation", "recall_marker", "action", "proposal", "follow_up",
+})
+
+def _qecho_norm(s: str) -> str:
+    s = (s or "").lower().strip()
+    s = _QECHO_PUNCT_RE.sub(" ", s)
+    s = _QECHO_WS_RE.sub(" ", s).strip()
+    return s
+
+def _strip_query_echo(uplan, query: str) -> None:
+    """Drop MeaningUnits whose content is a verbatim echo of the user query.
+
+    Substrate may contain edges where the user prompt was ingested as a property
+    object (e.g. `(entropy, has_property, "Define entropy.")`). When that lands
+    as a unit, the realizer emits the user's own words back. This is seam #4.
+
+    Filter is conservative: only drops when normalized(content) == normalized(query),
+    or content is a short fragment fully contained in query (or vice versa) for
+    unit types where echo is realization noise. Never drops must_include units.
+    """
+    nq = _qecho_norm(query)
+    if not nq or len(nq) < 3:
+        return
+    kept = []
+    for u in uplan.meaning_units:
+        if u.must_include:
+            kept.append(u); continue
+        nc = _qecho_norm(u.content or "")
+        if not nc:
+            kept.append(u); continue
+        if nc == nq:
+            continue
+        if u.type in _QECHO_SAFE_TYPES and len(nc) <= max(40, int(len(nq) * 1.2)):
+            if nc in nq or nq in nc:
+                continue
+        kept.append(u)
+    uplan.meaning_units = kept
+
 _repair_engine = RepairEngine()
 
 # Voice profile is loaded once at module import
@@ -192,6 +235,13 @@ def run_language_cognition(
         speech_act, response_plan, state,
         sense_frames=pragma.sense_frames if pragma else None,
     )
+
+    # ── 3a. Query-echo strip (seam #4) ────────────────────────────────────────
+    # Drop MeaningUnits whose content is a verbatim echo of the user query.
+    # Substrate occasionally carries the prompt as a property object; without
+    # this filter the realizer emits the user's own words back as a property
+    # or follow-up. Conservative: must_include units preserved.
+    _strip_query_echo(uplan, query)
 
     # ── 3b. Expression hint (A′ seam #1) ──────────────────────────────────────
     # Pull deterministic stance/cadence features from the 518 language_expression
