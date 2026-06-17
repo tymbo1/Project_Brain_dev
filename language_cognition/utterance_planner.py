@@ -532,10 +532,16 @@ def _enrich_with_sense_frames(
     # Offer clarification only when: polysemy is high, no domain is established,
     # confidence is not strong, and query is genuinely ambiguous.
     avg_polysemy = sum(len(v) for v in sense_frames.values()) / len(sense_frames)
+    has_strong_definition = any(
+        u.type in ("definition", "nature", "property", "relation")
+        and len((u.content or "").strip()) >= 10
+        for u in plan.meaning_units
+    )
     if (avg_polysemy >= 4
             and not active_domain
             and not user_disambiguated
             and confidence < 0.65
+            and not has_strong_definition
             and plan.speech_act in ("DEFINE", "CLARIFY", "ASSERT")
             and not any(u.type == "follow_up" for u in plan.meaning_units)):
         gloss_a = focus_hints[0].gloss[:80].rstrip(".")
