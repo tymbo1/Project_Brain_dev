@@ -19,6 +19,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
+try:
+    from language_cognition.dialogue_focus import FocusState, update_focus_from_lc
+except Exception:
+    FocusState = None  # type: ignore
+    update_focus_from_lc = None  # type: ignore
+
 
 @dataclass
 class DialogueTurn:
@@ -30,6 +36,7 @@ class DialogueTurn:
     inferred_intent: str = ""
     repair_needed: bool = False
     emotional_signal: str = "neutral"
+    domain:        str | None = None  # dominant semantic domain this turn
 
 
 @dataclass
@@ -73,6 +80,15 @@ class DialogueMemory:
         self.repair_history:    list[dict]            = []
         self._last_user_claim:  str                   = ""
         self._last_assistant_text: str                = ""
+        self.focus_state = FocusState() if FocusState is not None else None
+
+    def update_focus(self, lc_result, response_plan, turn_number: int = 0, query: str = "") -> None:
+        """Update focus state after a LangCog result."""
+        if self.focus_state is not None and update_focus_from_lc is not None:
+            try:
+                update_focus_from_lc(self.focus_state, lc_result, response_plan, turn_number, query=query)
+            except Exception:
+                pass
 
     # ── Turn management ───────────────────────────────────────────────────────
 
@@ -93,6 +109,7 @@ class DialogueMemory:
         inferred_intent: str = "",
         repair_needed: bool = False,
         emotional_signal: str = "neutral",
+        domain: str | None = None,
     ) -> DialogueTurn:
         t = DialogueTurn(
             turn_number=len(self.turns),
@@ -103,6 +120,7 @@ class DialogueMemory:
             inferred_intent=inferred_intent,
             repair_needed=repair_needed,
             emotional_signal=emotional_signal,
+            domain=domain,
         )
         self.add_turn(t)
         return t
@@ -194,6 +212,12 @@ class DialogueMemory:
     @property
     def has_active_repairs(self) -> bool:
         return bool(self.user_corrections)
+
+    @property
+    def domain_trail(self) -> list[str]:
+        """Ordered list of non-null domains from user turns, capped at last 10."""
+        trail = [t.domain for t in self.turns if t.role == "user" and t.domain]
+        return trail[-10:]
 
     def as_history(self) -> list[dict]:
         """Return turn list as standard history format for LangCog pipeline."""

@@ -73,17 +73,30 @@ _NOVICE_SIGNALS = {"explain", "what is", "i don't understand", "confused", "simp
 
 @dataclass
 class DiscourseState:
-    topic:               str   = ""
-    user_act:            str   = "question"
-    implied_need:        str   = "understand"
-    prior_assistant_act: str   = ""
-    prior_topic:         str   = ""
-    depth:               int   = 0
-    active_project:      str   = ""
-    emotional_pressure:  float = 0.0
-    user_knowledge_level:str   = "familiar"
-    response_goal:       str   = ""
-    must_not:            list  = field(default_factory=list)
+    topic:               str        = ""
+    user_act:            str        = "question"
+    implied_need:        str        = "understand"
+    prior_assistant_act: str        = ""
+    prior_topic:         str        = ""
+    depth:               int        = 0
+    active_project:      str        = ""
+    emotional_pressure:  float      = 0.0
+    user_knowledge_level:str        = "familiar"
+    response_goal:       str        = ""
+    must_not:            list       = field(default_factory=list)
+    active_domain:       str | None = None   # dominant semantic domain this turn
+    domain_trail:        list[str]  = field(default_factory=list)  # domains seen across turns (newest last)
+
+    @property
+    def persistent_domain(self) -> str | None:
+        """Domain that has appeared in ≥2 of the last 3 turns — indicates sustained topic."""
+        if len(self.domain_trail) < 2:
+            return None
+        recent = self.domain_trail[-3:]
+        for d in set(recent):
+            if recent.count(d) >= 2:
+                return d
+        return None
 
     def as_dict(self) -> dict:
         return {
@@ -97,6 +110,8 @@ class DiscourseState:
             "user_knowledge":      self.user_knowledge_level,
             "response_goal":       self.response_goal,
             "must_not":            self.must_not,
+            "active_domain":       self.active_domain,
+            "persistent_domain":   self.persistent_domain,
         }
 
 
@@ -104,6 +119,8 @@ def infer_discourse_state(
     query: str,
     history: list[dict] | None = None,
     operator_output: dict | None = None,
+    dominant_domain: str | None = None,
+    domain_trail: list[str] | None = None,
 ) -> DiscourseState:
     """
     Infer DiscourseState from the current query + conversation history.
@@ -150,6 +167,13 @@ def infer_discourse_state(
         state.user_knowledge_level = "novice"
     else:
         state.user_knowledge_level = "familiar"
+
+    # ── Domain continuity (before response_goal so goal is domain-aware) ────────
+    state.active_domain = dominant_domain
+    trail = list(domain_trail) if domain_trail else []
+    if dominant_domain:
+        trail.append(dominant_domain)
+    state.domain_trail = trail[-10:]   # keep last 10 turns max
 
     # ── Response goal ─────────────────────────────────────────────────────────
     state.response_goal = _derive_response_goal(state)
@@ -207,13 +231,18 @@ def _infer_act_from_text(text: str) -> str:
     return "ASSERT"
 
 
+def _derive_response_goal_with_state(state: DiscourseState) -> str:
+    return _derive_response_goal(state)
+
+
 def _derive_response_goal(state: DiscourseState) -> str:
+    domain_ctx = f" in {state.persistent_domain} domain" if state.persistent_domain else ""
     if state.emotional_pressure > 0.5:
         return "diagnose and address the concern directly"
     if state.user_act == "question" and state.implied_need == "understand":
-        return f"explain {state.topic} at {state.user_knowledge_level} depth"
+        return f"explain {state.topic}{domain_ctx} at {state.user_knowledge_level} depth"
     if state.user_act == "request":
-        return f"fulfill the request for {state.topic}"
+        return f"fulfill the request for {state.topic}{domain_ctx}"
     if state.user_act == "concern":
         return "identify the problem and propose a fix"
     if state.user_act == "correction":
@@ -222,7 +251,7 @@ def _derive_response_goal(state: DiscourseState) -> str:
         return "engage with the claim — agree, extend, or challenge"
     if state.user_act == "challenge":
         return "provide evidence or acknowledge the limit honestly"
-    return f"respond to {state.user_act} about {state.topic}"
+    return f"respond to {state.user_act} about {state.topic}{domain_ctx}"
 
 
 def _derive_constraints(state: DiscourseState, operator_output: dict | None) -> list[str]:

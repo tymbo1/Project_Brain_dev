@@ -13,7 +13,9 @@ Repairs:
 """
 
 from __future__ import annotations
-from .utterance_planner import UtterancePlan, MeaningUnit
+from .utterance_planner import (
+    UtterancePlan, MeaningUnit, _choose_sense_by_domain, _QUERY_STRUCTURE_WORDS, _emit_sense_trace
+)
 
 
 _TIMAERION_HYPOTHESES = {"tlst", "oscar", "mirror", "braid", "tensor", "resonance field",
@@ -108,6 +110,11 @@ class RepairEngine:
         self._repair_contradiction(utterance_plan, response_plan)
         self._repair_epistemic_tier(utterance_plan, response_plan)
         self._repair_follow_up(utterance_plan)
+        # Sense-frame repairs — run last so they see the final plan state
+        if utterance_plan.sense_frames:
+            self._repair_wrong_sense(utterance_plan)
+            self._repair_ambiguity_ignored(utterance_plan)
+            self._repair_too_generic(utterance_plan)
         return utterance_plan
 
     # ── Repairs ───────────────────────────────────────────────────────────────
@@ -115,9 +122,9 @@ class RepairEngine:
     def _repair_memory_gap(self, plan: UtterancePlan, rplan) -> None:
         """If the plan has no substantive content, mark the gap honestly.
 
-        Respects affective routing set upstream by pipeline.py zero-chain fallback:
+        Respects affective routing already set by pipeline.py zero-chain fallback:
         REASSURE/PLAN/ASK_FOLLOWUP get stance-appropriate content units instead of
-        the generic MARK_UNCERTAINTY hedge.
+        the generic MARK_UNCERTAINTY hedge cascade.
         """
         act = getattr(plan, "speech_act", "") or ""
         hint = getattr(plan, "expression_hint", None)
@@ -158,7 +165,6 @@ class RepairEngine:
         )
         if has_content:
             return
-
 
         # A′ route: capsule pool reached → select opener variant by cadence.
         # Fallback (capsule_hits=0 OR unknown cadence): hand-curated B path below.
@@ -296,6 +302,165 @@ class RepairEngine:
                 ))
             if not plan.next_turn_affordance:
                 plan.next_turn_affordance = "ask"
+
+
+    # ── Sense-frame repairs ───────────────────────────────────────────────────
+
+    def _repair_wrong_sense(self, plan: UtterancePlan) -> None:
+        """
+        If an active domain is established but no definition/property unit is
+        domain-scoped, inject the domain-matched OEWN sense as a property.
+
+        Catches: operator gave generic definition, planner enrichment was suppressed
+        by the disambig guard, but the domain context is clear from the trail.
+
+        Guard: skip if any property unit already says "In {domain}".
+        """
+        active_domain = (plan.discourse_state.active_domain
+                         or plan.discourse_state.persistent_domain)
+        if not active_domain:
+            return
+        if plan.speech_act in ("RECALL", "CORRECT", "REFUSE", "REASSURE", "WARN"):
+            return
+
+        # Already domain-scoped?
+        domain_tag = f"In {active_domain}"
+        if any(domain_tag.lower() in u.content.lower()
+               for u in plan.meaning_units
+               if u.type in ("property", "definition")):
+            return
+
+        # Find focus term (most sense-rich, excluding query structure words)
+        candidates = {w: h for w, h in plan.sense_frames.items()
+                      if w.lower() not in _QUERY_STRUCTURE_WORDS}
+        if not candidates:
+            return
+        focus_word, focus_hints = max(candidates.items(), key=lambda kv: len(kv[1]))
+        best, reason = _choose_sense_by_domain(focus_hints, active_domain)
+        if not best or not best.gloss:
+            return
+
+        # Only inject if domain-matched sense differs from primary
+        primary_gloss = focus_hints[0].gloss if focus_hints else ""
+        if best.gloss == primary_gloss and best.domain != active_domain:
+            return  # no better sense available for this domain
+
+        plan.meaning_units.append(MeaningUnit(
+            type="property",
+            content=f"In {active_domain}: {best.gloss.rstrip('.')}.",
+            salience=0.68,
+            must_include=False,
+            stance="direct",
+        ))
+        _emit_sense_trace(
+            query=plan.discourse_state.topic or "",
+            focus_term=focus_word,
+            active_domain=active_domain,
+            hints=focus_hints,
+            chosen=best,
+            reason=reason,
+            confidence=1.0 - plan.uncertainty_level,
+            source_layer="repair_engine.wrong_sense",
+        )
+
+    def _repair_ambiguity_ignored(self, plan: UtterancePlan) -> None:
+        """
+        If a term is highly polysemous and the plan has no disambiguation
+        (no distinction or follow_up unit, no domain established), inject
+        a clarifying follow_up.
+
+        This catches cases the planner missed: e.g. operator output was very
+        confident so planner skipped enrichment, but the term is still ambiguous.
+        """
+        if plan.speech_act not in ("DEFINE", "ASSERT", "CLARIFY"):
+            return
+        if plan.discourse_state.active_domain or plan.discourse_state.persistent_domain:
+            return  # domain established — no ambiguity to flag
+        if any(u.type in ("follow_up", "distinction") for u in plan.meaning_units):
+            return  # already handled
+        # Seam #7: if a substantive content unit already exists, the polysemy
+        # is resolved by what's already being said — asking the user to
+        # disambiguate is noise on a confident-enough answer.
+        if any(u.type in ("definition", "nature", "property", "relation")
+               and len((u.content or "").strip()) >= 10
+               for u in plan.meaning_units):
+            return
+
+        # Compute avg polysemy excluding structure words
+        candidates = {w: h for w, h in plan.sense_frames.items()
+                      if w.lower() not in _QUERY_STRUCTURE_WORDS}
+        if not candidates:
+            return
+        avg = sum(len(h) for h in candidates.values()) / len(candidates)
+        if avg < 4:
+            return
+
+        focus_word, focus_hints = max(candidates.items(), key=lambda kv: len(kv[1]))
+        if len(focus_hints) < 2:
+            return
+
+        g0 = focus_hints[0].gloss[:80].rstrip(".")
+        g1 = focus_hints[1].gloss[:80].rstrip(".")
+        if g0 == g1:
+            return
+
+        plan.meaning_units.append(MeaningUnit(
+            type="follow_up",
+            content=f"Did you mean '{focus_word}' as in '{g0}', or more as '{g1}'?",
+            salience=0.45,
+            must_include=False,
+            stance="direct",
+        ))
+        plan.next_turn_affordance = "answer"
+
+    def _repair_too_generic(self, plan: UtterancePlan) -> None:
+        """
+        If the definition unit is very short and OEWN has a substantially
+        richer gloss for the focus term, append it as a supplementary property.
+
+        Threshold: operator definition < 45 chars AND OEWN gloss ≥ 60 chars.
+        Does not replace the operator definition — only supplements it.
+        """
+        defn_unit = next(
+            (u for u in plan.meaning_units if u.type == "definition" and not u.is_empty()),
+            None,
+        )
+        if not defn_unit or len(defn_unit.content) >= 45:
+            return
+
+        # Already have a supplementary property from enrichment?
+        if any(u.type == "property" and len(u.content) > 60 for u in plan.meaning_units):
+            return
+
+        candidates = {w: h for w, h in plan.sense_frames.items()
+                      if w.lower() not in _QUERY_STRUCTURE_WORDS}
+        if not candidates:
+            return
+        focus_word, focus_hints = max(candidates.items(), key=lambda kv: len(kv[1]))
+        active_domain = plan.discourse_state.active_domain or plan.discourse_state.persistent_domain
+        best, reason = _choose_sense_by_domain(focus_hints, active_domain)
+        if not best or not best.gloss or len(best.gloss) < 60:
+            return
+        if best.gloss.lower() in defn_unit.content.lower():
+            return  # already covered
+
+        plan.meaning_units.append(MeaningUnit(
+            type="property",
+            content=best.gloss.rstrip(".") + ".",
+            salience=0.55,
+            must_include=False,
+            stance="direct",
+        ))
+        _emit_sense_trace(
+            query=plan.discourse_state.topic or "",
+            focus_term=focus_word,
+            active_domain=active_domain,
+            hints=focus_hints,
+            chosen=best,
+            reason=reason,
+            confidence=1.0 - plan.uncertainty_level,
+            source_layer="repair_engine.too_generic",
+        )
 
 
 def _generate_followup(plan: UtterancePlan) -> str:

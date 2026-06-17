@@ -21,11 +21,12 @@ from .discourse_state import DiscourseState
 
 # ── Weights ───────────────────────────────────────────────────────────────────
 
-W1 = 0.35   # IntentMatch
-W2 = 0.25   # OperatorOutputFit
+W1 = 0.30   # IntentMatch
+W2 = 0.20   # OperatorOutputFit
 W3 = 0.20   # ConversationStateFit
 W4 = 0.15   # UserNeedFit
 W5 = 0.05   # Risk (penalty)
+W6 = 0.10   # SenseFrameFit — domain and polysemy signal from LexicalAnalysis
 
 # ── Speech act catalogue ──────────────────────────────────────────────────────
 
@@ -142,6 +143,7 @@ def rank_speech_acts(
     query: str,
     response_plan,              # ResponsePlan from cognitive_operators
     discourse_state: DiscourseState,
+    sense_frames: dict | None = None,
 ) -> list[SpeechActScore]:
     """Score and rank all speech acts. Returns list sorted highest first."""
     results = []
@@ -151,8 +153,9 @@ def rank_speech_acts(
         s_fit   = _conversation_state_fit(discourse_state, act)
         n_fit   = _user_need_fit(discourse_state, act)
         risk    = _risk(response_plan, act)
+        sf_fit  = _sense_frame_fit(discourse_state, act, sense_frames or {})
 
-        score = W1*intent + W2*op_fit + W3*s_fit + W4*n_fit - W5*risk
+        score = W1*intent + W2*op_fit + W3*s_fit + W4*n_fit + W6*sf_fit - W5*risk
         results.append(SpeechActScore(
             act=act, score=round(score, 4),
             intent_match=intent, op_fit=op_fit,
@@ -167,9 +170,10 @@ def select_speech_act(
     query: str,
     response_plan,
     discourse_state: DiscourseState,
+    sense_frames: dict | None = None,
 ) -> str:
     """Return the highest-scoring speech act."""
-    ranked = rank_speech_acts(query, response_plan, discourse_state)
+    ranked = rank_speech_acts(query, response_plan, discourse_state, sense_frames=sense_frames)
     return ranked[0].act
 
 
@@ -236,6 +240,61 @@ def _user_need_fit(state: DiscourseState, act: str) -> float:
     if act in preferred:
         return 1.0 - preferred.index(act) * 0.2
     return 0.2
+
+
+_DOMAIN_PREFERRED_ACTS: dict[str, list[str]] = {
+    "linguistics":      ["ASSERT", "DEFINE", "CLARIFY"],
+    "computer science": ["DEFINE", "ASSERT", "PLAN"],
+    "mathematics":      ["DEFINE", "ASSERT", "MARK_UNCERTAINTY"],
+    "medicine":         ["ASSERT", "MARK_UNCERTAINTY", "WARN"],
+    "philosophy":       ["ASSERT", "CLARIFY", "MARK_UNCERTAINTY"],
+    "psychology":       ["ASSERT", "CLARIFY", "DEFINE"],
+    "chemistry":        ["DEFINE", "ASSERT", "MARK_UNCERTAINTY"],
+    "physics":          ["ASSERT", "DEFINE", "MARK_UNCERTAINTY"],
+    "biology":          ["ASSERT", "DEFINE", "CLARIFY"],
+    "law":              ["ASSERT", "WARN", "CLARIFY"],
+    "economics":        ["ASSERT", "CLARIFY", "MARK_UNCERTAINTY"],
+    "music":            ["ASSERT", "DEFINE", "CLARIFY"],
+}
+
+
+def _sense_frame_fit(state: DiscourseState, act: str, sense_frames: dict) -> float:
+    """
+    Score based on lexical sense data:
+      - Polysemy: many senses for a key term → CLARIFY / DEFINE preferred
+      - Coverage gap: content terms with no senses → MARK_UNCERTAINTY preferred
+      - Domain priors: active/persistent domain → domain-specific act preferences
+    """
+    # ── Domain priors ─────────────────────────────────────────────────────────
+    domain = state.active_domain or state.persistent_domain
+    domain_score = 0.0
+    if domain:
+        preferred = _DOMAIN_PREFERRED_ACTS.get(domain, [])
+        if act in preferred:
+            domain_score = 1.0 - preferred.index(act) * 0.25
+
+    if not sense_frames:
+        return domain_score
+
+    # ── Polysemy signal ───────────────────────────────────────────────────────
+    sense_counts = [len(v) for v in sense_frames.values()]
+    avg_polysemy = sum(sense_counts) / len(sense_counts)
+
+    polysemy_score = 0.0
+    if avg_polysemy >= 3:
+        if act == "CLARIFY":
+            polysemy_score = 0.8
+        elif act == "DEFINE":
+            polysemy_score = 0.6
+
+    # ── Coverage gap signal ───────────────────────────────────────────────────
+    # If the query has content terms but sense_frames is sparse, the vocabulary
+    # is domain-specific or out-of-lexicon → prefer MARK_UNCERTAINTY
+    coverage_score = 0.0
+    if act == "MARK_UNCERTAINTY" and avg_polysemy == 1:
+        coverage_score = 0.3
+
+    return max(domain_score, polysemy_score, coverage_score)
 
 
 def _risk(plan, act: str) -> float:

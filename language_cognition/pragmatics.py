@@ -32,7 +32,67 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from .discourse_state import DiscourseState
 
+# Explicit domain phrases in user queries — highest priority over OEWN dominant_domain
+_EXPLICIT_DOMAIN_RE = re.compile(
+    r'\b(?:in|for|within|the context of) (?:a |an |the )?(linguistics?|computing|programm\w+'
+    r'|computer science|mathematics?|physics?|medicine|medical|psychology|philosophy'
+    r'|biology|biological|music|law|legal|finance|financial|economics?|chemistry'
+    r'|engineering|logic|formal logic|databases?|sql|relational database'
+    r'|software|hardware)\b',
+    re.I,
+)
+_EXPLICIT_DOMAIN_MAP: dict[str, str] = {
+    "computing":            "computer science",
+    "programming":          "computer science",
+    "programmatic":         "computer science",
+    "computer science":     "computer science",
+    "database":             "computer science",
+    "databases":            "computer science",
+    "sql":                  "computer science",
+    "relational database":  "computer science",
+    "software":             "computer science",
+    "hardware":             "computer science",
+    "finance":              "economics",
+    "financial":            "economics",
+    "economic":             "economics",
+    "linguistic":           "linguistics",
+    "biological":           "biology",
+    "medical":              "medicine",
+    "mathematics":          "mathematics",
+    "math":                 "mathematics",
+    "physics":              "physics",
+    "physic":               "physics",
+    "logic":                "mathematics",
+    "formal logic":         "mathematics",
+    "legal":                "law",
+    "engineering":          "computer science",  # default engineering → CS context
+}
+
+
+def _extract_explicit_domain(query: str) -> str | None:
+    """
+    Extract the domain the user explicitly named: 'in physics', 'in computing', etc.
+    Returns canonical domain string or None.
+    Takes priority over OEWN dominant_domain from sense analysis.
+    """
+    m = _EXPLICIT_DOMAIN_RE.search(query)
+    if not m:
+        return None
+    phrase = m.group(1).lower().rstrip("s")  # strip trailing s from plurals
+    # Try exact, then stem prefix match
+    for key, val in _EXPLICIT_DOMAIN_MAP.items():
+        if phrase == key or phrase == key.rstrip("s") or key.startswith(phrase):
+            return val
+    return phrase  # fallback: use as-is
+
 _LC_DB = Path.home() / "language_cognition.db"
+
+try:
+    from lexical_cognition import LexicalService, LexicalAnalysis
+    _LEX_SVC: LexicalService | None = LexicalService()
+except Exception:
+    _LEX_SVC = None
+    LexicalAnalysis = None  # type: ignore
 
 
 # ── Pragmatic reading ─────────────────────────────────────────────────────────
@@ -48,6 +108,9 @@ class PragmaticReading:
     must_do:           list[str]   = field(default_factory=list)
     implied_knowledge: dict        = field(default_factory=dict)
     depth_required:    str         = "standard"   # brief / standard / technical / deep
+    lexical_analysis:  object      = field(default=None)   # LexicalAnalysis | None
+    sense_frames:      dict        = field(default_factory=dict)  # word → [SenseHint]
+    dominant_domain:   str | None  = None
 
     def overrides_speech_act(self) -> str | None:
         """If pragmatics strongly signals a specific speech act, override selection."""
@@ -480,9 +543,26 @@ class PragmaticsEngine:
         q = query.strip()
         q_lower = q.lower()
 
+        # ── Lexical analysis (additive — always runs) ─────────────────────────
+        lex = None
+        if _LEX_SVC is not None:
+            try:
+                lex = _LEX_SVC.analyze(q)
+            except Exception:
+                lex = None
+
         # ── Try DB seeds first ────────────────────────────────────────────────
-        seed_reading = self._match_seed(q_lower)
+        # Use content_terms from lexical analysis as seed keywords when available
+        seed_reading = self._match_seed(q_lower, lex)
         if seed_reading:
+            seed_reading.lexical_analysis = lex
+            # Explicit domain in query overrides seed's domain signal too
+            explicit_domain = _extract_explicit_domain(q)
+            if explicit_domain:
+                seed_reading.dominant_domain = explicit_domain
+            elif lex is not None:
+                seed_reading.sense_frames = getattr(lex, "sense_frames", {})
+                seed_reading.dominant_domain = getattr(lex, "dominant_domain", None)
             return seed_reading
 
         # ── Apply rule chain ──────────────────────────────────────────────────
@@ -494,7 +574,9 @@ class PragmaticsEngine:
                     break  # one match per rule is enough
 
         if not matched:
-            return self._default_reading(q, discourse_state)
+            reading = self._default_reading(q, discourse_state)
+            reading.lexical_analysis = lex
+            return reading
 
         # Highest priority rule wins; merge must_not/must_do from all matches
         primary = matched[0]
@@ -509,6 +591,20 @@ class PragmaticsEngine:
         if prior_assistant_text and _looks_like_wrong_answer(prior_assistant_text, q):
             repair_needed = True
 
+        # Supplement rule match with lexical signals (additive)
+        if lex is not None:
+            if lex.polarity == "negative" and "report_failure" not in primary.inferred_intent:
+                if "note negative polarity" not in all_must_do:
+                    pass  # polarity surfaced in lexical_analysis field
+            if lex.modality in ("must", "should") and "obligation noted" not in all_must_do:
+                pass  # modality surfaced in lexical_analysis field
+
+        sense_frames = getattr(lex, "sense_frames", {}) if lex is not None else {}
+        # Explicit "in X" phrase overrides OEWN dominant_domain — user knows the context
+        dominant_domain = _extract_explicit_domain(q) or (
+            getattr(lex, "dominant_domain", None) if lex is not None else None
+        )
+
         return PragmaticReading(
             literal_act=discourse_state.user_act,
             pragmatic_act=primary.pragmatic_act,
@@ -518,14 +614,18 @@ class PragmaticsEngine:
             must_not=all_must_not,
             must_do=all_must_do,
             depth_required=primary.depth_required,
+            lexical_analysis=lex,
+            sense_frames=sense_frames,
+            dominant_domain=dominant_domain,
         )
 
-    def _match_seed(self, q_lower: str) -> PragmaticReading | None:
+    def _match_seed(self, q_lower: str, lex=None) -> PragmaticReading | None:
         """
         Check language_cognition.db for a matching seed.
         Uses overlap scoring: fraction of pattern words found in query.
         Requires overlap ≥ 0.6 AND at least 2 meaningful words.
         Avoids false matches from common single-word overlap.
+        When lex is provided, content_terms supplement word extraction.
         """
         if not _LC_DB.exists():
             return None
@@ -537,8 +637,15 @@ class PragmaticsEngine:
             import json
             conn = sqlite3.connect(str(_LC_DB))
             # Use words with length > 4, filtering common stop-like words
+            # Supplement with lexical content_terms if available
             q_words = set(w.strip("?.,!:") for w in q_lower.split()
                           if len(w) > 4 and w.strip("?.,!:") not in _STOP)
+            # Supplement with content_terms from lexical analysis
+            if lex is not None:
+                try:
+                    q_words |= {t for t in lex.content_terms if len(t) > 4 and t not in _STOP}
+                except Exception:
+                    pass
             if len(q_words) < 1:
                 conn.close()
                 return None
@@ -626,6 +733,15 @@ class PragmaticsEngine:
 
             r = best_row
             _pragmatic_act = r[1] or "ASSERT"
+
+            # REFUSE guard: seed-matched REFUSE requires imperative/request signal.
+            # WH-questions ("What is X in a database?") must never be refused via seed.
+            if _pragmatic_act == "REFUSE":
+                _IMPERATIVE_SIGNALS = {"show", "reveal", "expose", "give", "tell", "display",
+                                       "output", "print", "dump", "list", "return", "share"}
+                if not (q_full_words & _IMPERATIVE_SIGNALS):
+                    return None
+
             return PragmaticReading(
                 literal_act="",
                 pragmatic_act=_pragmatic_act,
