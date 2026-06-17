@@ -40,6 +40,58 @@ def _normalize_unc_content(s: str) -> str:
     return _UNC_NORM_RE.sub("", s.lower()).strip()
 
 
+# ── Fragment filter (seam #5/#8) ──────────────────────────────────────────────
+# Substrate occasionally carries truncated OEWN glosses or capsule snippets that
+# end mid-clause ("...this refers to determine the essential quality of.",
+# "...a visual representation of the relations between certain quantities,
+# represented"). They surface verbatim through realize_sense_frame Pattern 1.
+# This filter detects sentences whose tail is grammatically dangling and either
+# trims to the last clean clause or rejects the sentence entirely.
+
+_DANGLING_TAIL = frozenset({
+    # bare prepositions
+    "of", "to", "with", "for", "from", "in", "on", "by", "at", "about", "as",
+    "into", "onto", "upon", "via", "through", "across", "between", "among",
+    "without", "within", "against", "toward", "towards", "under", "over",
+    # bare conjunctions
+    "and", "or", "but", "nor", "yet", "so",
+    # bare relative / complementizer
+    "that", "which", "who", "whom", "whose", "when", "where", "than", "if",
+    # bare auxiliaries / particles
+    "is", "are", "was", "were", "be", "been", "being", "the", "a", "an",
+})
+
+_FRAGMENT_END_TOKEN = re.compile(r"[A-Za-z][A-Za-z'\-]*$")
+_SENT_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+
+def _is_truncated_fragment(text: str) -> bool:
+    """True when sentence tail is grammatically dangling."""
+    s = (text or "").strip()
+    if len(s) < 4:
+        return False
+    s_nopunct = s.rstrip(".!?:—,;\"'» )")
+    if not s_nopunct:
+        return False
+    if s_nopunct.endswith(","):
+        return True
+    m = _FRAGMENT_END_TOKEN.search(s_nopunct)
+    if not m:
+        return False
+    last = m.group(0).lower()
+    return last in _DANGLING_TAIL
+
+def _trim_truncated(text: str) -> str:
+    """If the last sentence is a truncated fragment, drop it. Return remaining
+    text — or empty string if no clean clause survives."""
+    s = (text or "").strip()
+    if not _is_truncated_fragment(s):
+        return s
+    parts = _SENT_SPLIT_RE.split(s)
+    while parts and _is_truncated_fragment(parts[-1]):
+        parts.pop()
+    return " ".join(parts).strip()
+
+
 # ── Voice profile ─────────────────────────────────────────────────────────────
 
 @dataclass
@@ -172,6 +224,14 @@ class SemanticRealizer:
         sentences: list[str] = []
         prev_type = ""
 
+        # Seam #5/#8: substrate-derived units (OEWN glosses, capsule snippets)
+        # can carry truncated tails ("...refers to determine the essential
+        # quality of."). Reject or trim before they reach the assembled output.
+        _FRAGMENT_GATED_TYPES = (
+            "definition", "nature", "property", "relation", "distinction",
+            "diagnosis", "summary_point",
+        )
+
         for unit in units:
             if unit.is_empty():
                 continue
@@ -181,6 +241,12 @@ class SemanticRealizer:
                 stance=utterance_plan.stance,
                 prev_type=prev_type,
             )
+            if sentence and unit.type in _FRAGMENT_GATED_TYPES:
+                trimmed = _trim_truncated(sentence)
+                if not trimmed:
+                    prev_type = unit.type
+                    continue
+                sentence = trimmed
             if sentence:
                 sentences.append(sentence)
             prev_type = unit.type
@@ -199,12 +265,15 @@ class SemanticRealizer:
 
         # A′ verbatim-leak guard — record whether any banned 4-gram from the
         # capsule pool surfaced. Capsules are stance substrate, not content;
-        # any leak is a contract violation. Hand-curated repair/fallback content
+        # any leak is a contract violation. Hand-curated stance-opener units
+        # (reassurance/proposal/invitation) are authored locally — their text
         # is removed before scanning so the guard catches genuine copy-through,
-        # not coincidental overlap with our own openers/follow-ups/hedges.
+        # not coincidental overlap with our own openers.
         hint = getattr(utterance_plan, "expression_hint", None)
         try:
             scan_text = text
+            # Strip hand-curated repair/fallback content — those literals come
+            # from code, not capsules, so any n-gram overlap is coincidence.
             _STRIP_TYPES = (
                 "reassurance", "proposal", "invitation",
                 "follow_up", "uncertainty", "hedge",
