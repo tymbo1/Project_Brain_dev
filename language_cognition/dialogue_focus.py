@@ -356,9 +356,9 @@ _FOCUS_STRUCTURE_WORDS = frozenset({
 # "What is X?" / "What is X in Y?" / "What are X?" — extract X (definiendum)
 _DEFINIENDUM_RE = re.compile(
     r'(?:'
-    r'\bwhat\s+(?:is|are)\s+(?:a\s+|an\s+|the\s+)?([a-z][\w\s]{0,20}?)(?:\s+in\s+|\s*\?|$)'
+    r'\bwhat\s+(?:is|are)\s+(?:a\s+|an\s+|the\s+)?([a-z][\w\s]{0,20}?)(?:\s+in\s+|\s+based\s+|\s+for\s+|\s+from\s+|\s+with\s+|\s+by\s+|\s+about\s+|\s*\?|$)'
     r'|'
-    r'\bwhat\s+about\s+(?:the\s+)?(?:concept\s+of\s+)?([a-z][\w\s]{0,20}?)(?:\s+in\s+|\s*\?|$)'
+    r'\bwhat\s+about\s+(?:the\s+)?(?:concept\s+of\s+)?([a-z][\w\s]{0,20}?)(?:\s+in\s+|\s+based\s+|\s+for\s+|\s+from\s+|\s+with\s+|\s+by\s+|\s+about\s+|\s*\?|$)'
     r')',
     re.IGNORECASE,
 )
