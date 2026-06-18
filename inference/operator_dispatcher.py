@@ -74,8 +74,41 @@ def _noop_passthrough(args: dict, context: dict | None = None) -> dict:
     return {"echo": args}
 
 
+def _py_classify_error(args: dict, context: dict | None = None) -> dict:
+    from codeops import parser
+    cls, sub = parser.classify(args.get("stderr", ""))
+    return {"error_class": cls, "subtype": sub}
+
+
+def _py_check_security(args: dict, context: dict | None = None) -> dict:
+    from codeops import sandbox
+    safe, reason = sandbox.is_safe(args.get("code", ""))
+    return {"safe": safe, "reason": reason}
+
+
+def _py_propose_fix(args: dict, context: dict | None = None) -> dict:
+    from codeops import fixer
+    fixed_code, fix_desc = fixer.apply(
+        args.get("code", ""),
+        args.get("stderr", ""),
+        args.get("error_class", ""),
+        args.get("subtype", ""),
+        cms_context=args.get("cms_context", ""),
+    )
+    return {"fixed_code": fixed_code, "fix_desc": fix_desc}
+
+
+def _py_run_sandboxed(args: dict, context: dict | None = None) -> dict:
+    from codeops import runner
+    return runner.run(args.get("code", ""), lang=args.get("lang", ""))
+
+
 _HANDLERS: dict[str, Callable[[dict, dict | None], Any]] = {
-    "noop_passthrough": _noop_passthrough,
+    "noop_passthrough":  _noop_passthrough,
+    "py.classify_error": _py_classify_error,
+    "py.check_security": _py_check_security,
+    "py.propose_fix":    _py_propose_fix,
+    "py.run_sandboxed":  _py_run_sandboxed,
 }
 
 
