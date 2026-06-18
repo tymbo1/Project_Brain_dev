@@ -20,7 +20,7 @@ Locked 2026-06-18 per Tim'aerion Phase A1.
 | `python_fix_pairs` | `~/selyrioncode.db` :: `fix_pairs` | 3,429 rows |
 | `python_relations` | `~/resonance_v11.db` :: `relations_aggregated` WHERE subject ∈ coding anchors | 4,640 edges |
 | `python_benchmark_results` | `~/claudecode.db` :: `programming_benchmark_runs` | retrieval-only at present (§10 needs execution suites added in Phase D2) |
-| `python_verification_bundle` | `~/claudecode.db` :: `execution_traces` | partial; Phase C2 extends with parse/lint/type/runtime/tests columns |
+| `python_verification_bundle` | `~/claudecode.db` :: `execution_traces` | Migration 016 added 14 §9 verdict cols (parse_ok/lint_ok/typecheck_ok/import_resolution_ok + runtime_executed/exit_code/exception_type + tests_present/run/passed/failed + memory_mb + risks_detected_json + verdict). Pre-existing rows NULL; verdict enum enforced in write path. |
 | `python_version_profile` | `~/selyrioncode.db` :: `python_version_profiles` | Added by migration 015. Empty until ingested. |
 | `python_library_profile` | `~/selyrioncode.db` :: `python_library_profiles` | Added by migration 015. Empty until ingested. |
 | `python_project_profile` | — | GAP. Deferred (Phase D+). |
