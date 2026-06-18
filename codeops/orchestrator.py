@@ -22,7 +22,8 @@ MAX_ATTEMPTS = 5
 
 
 def _emit_verification_trace(code, runner_result, blocked, attempts,
-                             problem, lang, started_at, outcome, final_out):
+                             problem, lang, started_at, outcome, final_out,
+                             codeunit_id=None):
     if _write_vtrace is None:
         return
     risks = sandbox.risks_detected(code) if blocked else None
@@ -43,13 +44,14 @@ def _emit_verification_trace(code, runner_result, blocked, attempts,
             runtime_ms=int((time.time() - started_at) * 1000),
             bundle=bundle,
             tool_chain=["sandbox", "runner", "parser", "fixer"][:1 + 3 * (not blocked)],
+            codeunit_id=codeunit_id,
         )
     except Exception:
         pass
 
 
 def run(code: str, lang: str = "", max_attempts: int = MAX_ATTEMPTS,
-        original_problem: str = "") -> dict:
+        original_problem: str = "", codeunit_id: str | None = None) -> dict:
 
     problem = original_problem or code
     _t0 = time.time()
@@ -66,7 +68,8 @@ def run(code: str, lang: str = "", max_attempts: int = MAX_ATTEMPTS,
         safe, reason = sandbox.is_safe(code)
         if not safe:
             _emit_verification_trace(code, None, True, attempt, problem, lang,
-                                     _t0, "blocked", reason)
+                                     _t0, "blocked", reason,
+                                     codeunit_id=codeunit_id)
             return {"status": "blocked", "reason": reason, "attempts": attempt,
                     "cms_confidence": cms["confidence"]}
 
@@ -78,7 +81,8 @@ def run(code: str, lang: str = "", max_attempts: int = MAX_ATTEMPTS,
             if attempt > 1:
                 reasoning_logger.log_success(code, problem, code)
             _emit_verification_trace(code, result, False, attempt, problem, lang,
-                                     _t0, "success", result.get("stdout", ""))
+                                     _t0, "success", result.get("stdout", ""),
+                                     codeunit_id=codeunit_id)
             return {
                 "status":          "success",
                 "code":            code,
@@ -119,7 +123,8 @@ def run(code: str, lang: str = "", max_attempts: int = MAX_ATTEMPTS,
         code = fixed_code
 
     _emit_verification_trace(code, result, False, attempt, problem, lang,
-                             _t0, "failure", result.get("stderr", "") if result else "")
+                             _t0, "failure", result.get("stderr", "") if result else "",
+                             codeunit_id=codeunit_id)
     return {
         "status":         "failed",
         "last_code":      code,

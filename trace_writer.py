@@ -200,7 +200,8 @@ def write_verification_trace(*, tool_name: str, session_id: str, intent: str,
                              domain_tag: str, outcome: str,
                              final_output: str, runtime_ms: int,
                              bundle: dict, tool_chain: list | None = None,
-                             parent_trace_id: str | None = None) -> str:
+                             parent_trace_id: str | None = None,
+                             codeunit_id: str | None = None) -> str:
     """Insert one execution_traces row with verification-bundle cols populated.
 
     bundle keys: parse_ok, lint_ok, typecheck_ok, import_resolution_ok,
@@ -234,8 +235,11 @@ def write_verification_trace(*, tool_name: str, session_id: str, intent: str,
         "parent_trace_id": parent_trace_id,
     }
     bundle_vals = {c: bundle.get(c) for c in _BUNDLE_COLS}
-    cols = list(base) + list(bundle_vals)
-    vals = [base[c] for c in base] + [bundle_vals[c] for c in bundle_vals]
+    extra = {"codeunit_id": codeunit_id} if codeunit_id is not None else {}
+    cols = list(base) + list(bundle_vals) + list(extra)
+    vals = ([base[c] for c in base]
+            + [bundle_vals[c] for c in bundle_vals]
+            + [extra[c] for c in extra])
     placeholders = ",".join("?" * len(cols))
     sql = (
         f"INSERT OR IGNORE INTO execution_traces ({','.join(cols)}) "
