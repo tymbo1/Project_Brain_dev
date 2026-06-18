@@ -21,8 +21,8 @@ Locked 2026-06-18 per Tim'aerion Phase A1.
 | `python_relations` | `~/resonance_v11.db` :: `relations_aggregated` WHERE subject ∈ coding anchors | 4,640 edges |
 | `python_benchmark_results` | `~/claudecode.db` :: `programming_benchmark_runs` | retrieval-only at present (§10 needs execution suites added in Phase D2) |
 | `python_verification_bundle` | `~/claudecode.db` :: `execution_traces` | partial; Phase C2 extends with parse/lint/type/runtime/tests columns |
-| `python_version_profile` | — | GAP. Phase C1. |
-| `python_library_profile` | — | GAP. Phase C1. |
+| `python_version_profile` | `~/selyrioncode.db` :: `python_version_profiles` | Added by migration 015. Empty until ingested. |
+| `python_library_profile` | `~/selyrioncode.db` :: `python_library_profiles` | Added by migration 015. Empty until ingested. |
 | `python_project_profile` | — | GAP. Deferred (Phase D+). |
 | `python_explanation_plan` | runtime construct in `language_cognition/` pipeline | not persisted; computed per response |
 | `python_security_profile` | `codeops/sandbox.py` :: `BLOCKED_PATTERNS` + AST scan | static; no per-unit persistence yet |
