@@ -26,15 +26,15 @@ TASK_TYPE = "verify_codeunit"
 LANE = "cpu"
 
 
-def _fetch_code(codeunit_id: str) -> tuple[str | None, str | None]:
+def _fetch_code(codeunit_id: str) -> tuple[str | None, str | None, str | None]:
     with sqlite3.connect(SELYRIONCODE_DB) as c:
         row = c.execute(
-            "SELECT parsed_code, raw_input FROM codeunits WHERE id=?",
+            "SELECT parsed_code, raw_input, environment FROM codeunits WHERE id=?",
             (codeunit_id,),
         ).fetchone()
     if row is None:
-        return None, None
-    return row[0], row[1]
+        return None, None, None
+    return row[0], row[1], row[2]
 
 
 def process_one(*, worker_id: str, lease_s: int = scheduler.DEFAULT_LEASE_S,
@@ -52,12 +52,18 @@ def process_one(*, worker_id: str, lease_s: int = scheduler.DEFAULT_LEASE_S,
         return {"task_id": task["task_id"], "status": "failed",
                 "reason": "missing codeunit_id"}
 
-    code, _raw = _fetch_code(cu_id)
+    code, _raw, env = _fetch_code(cu_id)
     if code is None:
         scheduler.fail(task["task_id"], worker_id,
                        f"codeunit {cu_id} not found", retry=False)
         return {"task_id": task["task_id"], "status": "failed",
                 "reason": "codeunit not found"}
+
+    if env != "python":
+        scheduler.complete(task["task_id"], worker_id,
+                           result={"skipped": "wrong_lang", "env": env})
+        return {"task_id": task["task_id"], "status": "skipped",
+                "reason": "wrong_lang", "env": env}
 
     t0 = time.time()
     try:
@@ -91,7 +97,8 @@ def seed_tasks(*, limit: int | None = None,
     Idempotent — re-enqueuing the same cu_id is a no-op (deterministic task_id).
     """
     placeholders = ",".join("?" * len(truth_states))
-    sql = f"SELECT id FROM codeunits WHERE truth_state IN ({placeholders})"
+    sql = (f"SELECT id FROM codeunits WHERE truth_state IN ({placeholders}) "
+           f"AND environment='python'")
     params: list = list(truth_states)
     if limit is not None:
         sql += " LIMIT ?"
