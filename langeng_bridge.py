@@ -128,6 +128,12 @@ _EXPR_DOMAIN_TRIGGERS: dict[str, set[str]] = {
         "funny", "laugh", "joke", "silly", "lighten", "smile", "playful",
         "haha", "heh", "absurd",
     },
+    "programming": {
+        "python", "code", "function", "class", "method", "module", "library",
+        "package", "error", "exception", "traceback", "bug", "fix", "debug",
+        "stack trace", "test", "tests", "refactor", "implement", "syntax",
+        "runtime", "type error", "compile",
+    },
 }
 
 
