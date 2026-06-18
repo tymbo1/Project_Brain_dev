@@ -184,6 +184,72 @@ class Trace:
 
 # ── Query helpers (for advisor context, dashboard, etc.) ──────────────────────
 
+_VERDICTS = {
+    "failed_parse", "failed_static", "failed_runtime",
+    "passed_minimal", "passed_verified", "passed_benchmarked",
+}
+_BUNDLE_COLS = (
+    "parse_ok", "lint_ok", "typecheck_ok", "import_resolution_ok",
+    "runtime_executed", "runtime_exit_code", "runtime_exception_type",
+    "tests_present", "tests_run", "tests_passed", "tests_failed",
+    "memory_mb", "risks_detected_json", "verdict",
+)
+
+
+def write_verification_trace(*, tool_name: str, session_id: str, intent: str,
+                             domain_tag: str, outcome: str,
+                             final_output: str, runtime_ms: int,
+                             bundle: dict, tool_chain: list | None = None,
+                             parent_trace_id: str | None = None) -> str:
+    """Insert one execution_traces row with verification-bundle cols populated.
+
+    bundle keys: parse_ok, lint_ok, typecheck_ok, import_resolution_ok,
+    runtime_executed, runtime_exit_code, runtime_exception_type,
+    tests_present, tests_run, tests_passed, tests_failed, memory_mb,
+    risks_detected_json, verdict.
+    """
+    verdict = bundle.get("verdict")
+    if verdict is not None and verdict not in _VERDICTS:
+        raise ValueError(f"unknown verdict: {verdict!r}")
+
+    tid = _tid(tool_name)
+    started = time.time()
+    base = {
+        "id": tid,
+        "session_id": session_id,
+        "intent": intent[:200],
+        "tool_name": tool_name,
+        "tool_chain": json.dumps(tool_chain or [tool_name]),
+        "memory_reads": "[]",
+        "memory_writes": "[]",
+        "contradictions": "[]",
+        "confidence_flow": "[]",
+        "final_output": final_output[:2000],
+        "runtime_ms": runtime_ms,
+        "started_at": started,
+        "finished_at": started,
+        "domain_tag": domain_tag,
+        "outcome": outcome,
+        "input_hash": _h(intent),
+        "parent_trace_id": parent_trace_id,
+    }
+    bundle_vals = {c: bundle.get(c) for c in _BUNDLE_COLS}
+    cols = list(base) + list(bundle_vals)
+    vals = [base[c] for c in base] + [bundle_vals[c] for c in bundle_vals]
+    placeholders = ",".join("?" * len(cols))
+    sql = (
+        f"INSERT OR IGNORE INTO execution_traces ({','.join(cols)}) "
+        f"VALUES ({placeholders})"
+    )
+    try:
+        conn = sqlite3.connect(CLAUDECODE_DB)
+        conn.execute(sql, vals)
+        conn.commit(); conn.close()
+    except Exception:
+        pass
+    return tid
+
+
 def recent_traces(n: int = 20, domain: str = "", outcome: str = "",
                   tool: str = "") -> list[dict]:
     """Return recent traces as dicts, optionally filtered."""

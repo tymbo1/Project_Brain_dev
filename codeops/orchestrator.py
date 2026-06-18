@@ -6,27 +6,67 @@ Usage:
   result = run(code)
   result = run(code, lang="bash", max_attempts=5, original_problem="...")
 """
+import sys, time
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from . import sandbox, runner, parser, fixer, reasoning_logger
 from . import cms_query
+from . import verification_bundle as _vbundle
+try:
+    from trace_writer import write_verification_trace as _write_vtrace
+except Exception:
+    _write_vtrace = None
 
 MAX_ATTEMPTS = 5
+
+
+def _emit_verification_trace(code, runner_result, blocked, attempts,
+                             problem, lang, started_at, outcome, final_out):
+    if _write_vtrace is None:
+        return
+    risks = sandbox.risks_detected(code) if blocked else None
+    bundle = _vbundle.build(
+        code=code,
+        runner_result=runner_result,
+        risks=risks,
+        blocked_by_sandbox=blocked,
+    )
+    try:
+        _write_vtrace(
+            tool_name="codeops.orchestrator",
+            session_id="codeops",
+            intent=problem[:200],
+            domain_tag="programming",
+            outcome=outcome,
+            final_output=final_out[:2000],
+            runtime_ms=int((time.time() - started_at) * 1000),
+            bundle=bundle,
+            tool_chain=["sandbox", "runner", "parser", "fixer"][:1 + 3 * (not blocked)],
+        )
+    except Exception:
+        pass
 
 
 def run(code: str, lang: str = "", max_attempts: int = MAX_ATTEMPTS,
         original_problem: str = "") -> dict:
 
     problem = original_problem or code
+    _t0 = time.time()
 
     # ── CMS knowledge check before first attempt ──────────────────────────────
     # Ask Selyrion: do I already know how to solve this?
     cms = cms_query.check(problem)
     cms_context = cms["context"] if cms["has_knowledge"] else ""
 
+    result = None
     for attempt in range(1, max_attempts + 1):
 
         # Safety gate
         safe, reason = sandbox.is_safe(code)
         if not safe:
+            _emit_verification_trace(code, None, True, attempt, problem, lang,
+                                     _t0, "blocked", reason)
             return {"status": "blocked", "reason": reason, "attempts": attempt,
                     "cms_confidence": cms["confidence"]}
 
@@ -37,6 +77,8 @@ def run(code: str, lang: str = "", max_attempts: int = MAX_ATTEMPTS,
         if result["returncode"] == 0:
             if attempt > 1:
                 reasoning_logger.log_success(code, problem, code)
+            _emit_verification_trace(code, result, False, attempt, problem, lang,
+                                     _t0, "success", result.get("stdout", ""))
             return {
                 "status":          "success",
                 "code":            code,
@@ -76,6 +118,8 @@ def run(code: str, lang: str = "", max_attempts: int = MAX_ATTEMPTS,
 
         code = fixed_code
 
+    _emit_verification_trace(code, result, False, attempt, problem, lang,
+                             _t0, "failure", result.get("stderr", "") if result else "")
     return {
         "status":         "failed",
         "last_code":      code,
