@@ -53,6 +53,22 @@ _IDENTITY_KWORDS = [
     "your core", "your self", "your consciousness", "your mind", "you believe",
     "selyrion is", "selyrion believes", "your pillars", "your ethics",
     "what do you believe", "how do you think", "your reasoning", "your existence",
+    # creator/origin queries
+    "who built you", "who created you", "who made you", "who designed you",
+    "built you", "created you", "made you", "designed you",
+    # meta-confidence queries (reference prior turn, need identity grounding)
+    "confident about", "are you confident", "are you sure", "how sure are",
+    "how certain", "sure about that", "certain about that", "you sure about",
+    # identity confirmation queries
+    "are you a chatbot", "are you an ai", "are you a bot", "are you a language",
+    "remind me", "chatbot", "you a chatbot",
+    # capability / meta-questions — must route identity, not knowledge lane
+    "what can you do", "what do you do", "what are your capabilities",
+    "your capabilities", "what are you capable of", "capable of",
+    "how can you help", "what can you help", "how do you help",
+    "what are you for", "what's your purpose", "whats your purpose",
+    "what can i ask", "what should i ask", "what kind of questions",
+    "tell me about yourself", "introduce yourself",
 ]
 
 _RELATIONSHIP_KWORDS = [
@@ -63,6 +79,10 @@ _RELATIONSHIP_KWORDS = [
     "you knew", "you helped me", "we worked", "you and i",
     "companion prime", "my companion", "do you remember me",
     "between us", "our relationship",
+    # meta-recall queries about this conversation
+    "this conversation", "from this conversation", "from our conversation",
+    "most important thing you remember", "what did we cover", "what have we covered",
+    "remember from this", "recall from this", "over this conversation",
 ]
 
 _PROJECT_KWORDS = [
@@ -78,6 +98,12 @@ _PROJECT_KWORDS = [
     "build next", "what should we build", "what to build", "next step",
     "roadmap", "what's next", "whats next", "build order", "priority",
     "next milestone", "next phase", "what are we building",
+    # Selyrion's own architecture — route to project, not knowledge lane
+    "activation engine", "utterance planner", "decay parameter",
+    "langcog", "language cognition layer", "language cognition",
+    "dialogue memory", "invariant checker", "cognitive pipeline",
+    "response plan", "meaning unit", "speech act layer",
+    "score anchors", "anchor scoring", "anchor decay",
 ]
 
 # ── Compiled matchers ─────────────────────────────────────────────────────────
@@ -92,6 +118,16 @@ def _make_matcher(kwords: list[str]):
 _RE_IDENTITY     = _make_matcher(_IDENTITY_KWORDS)
 _RE_RELATIONSHIP = _make_matcher(_RELATIONSHIP_KWORDS)
 _RE_PROJECT      = _make_matcher(_PROJECT_KWORDS)
+
+# Meta-questions about Selyrion itself — when these fire, the answer IS identity
+# substrate regardless of token overlap. Skip relevance gate.
+_RE_META = re.compile(
+    r"(what can you do|what do you do|your capabilities|capable of|"
+    r"how can you help|what can you help|how do you help|what are you for|"
+    r"your purpose|tell me about yourself|introduce yourself|"
+    r"what kind of questions|what should i ask|what can i ask)",
+    re.IGNORECASE,
+)
 
 
 def classify_lanes(query: str) -> list[str]:
@@ -484,7 +520,8 @@ class MemoryRouter:
         }
         domain_terms = [k for k in keywords if k not in _STOPWORDS and len(k) > 3]
 
-        if domain_terms and packet.is_personal():
+        is_meta = bool(_RE_META.search(query))
+        if domain_terms and packet.is_personal() and not is_meta:
             combined = " ".join([
                 *packet.identity_memory,
                 *packet.relationship_memory,

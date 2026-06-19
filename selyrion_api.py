@@ -593,6 +593,13 @@ _IDENTITY_TRIGGERS = {
     "remember from this conversation", "from this conversation",
     "from our conversation", "this conversation",
     "what do you remember", "what have we covered",
+    # capability / meta-questions — must route identity, not knowledge lane
+    "what can you do", "what do you do", "what are your capabilities",
+    "your capabilities", "what are you capable of", "capable of",
+    "how can you help", "what can you help", "how do you help",
+    "what are you for", "what's your purpose", "your purpose",
+    "what can i ask", "what should i ask", "what kind of questions",
+    "tell me about yourself", "introduce yourself",
 }
 
 _META_RECALL_RE = re.compile(
@@ -1202,7 +1209,7 @@ async def chat(req: ChatRequest, x_admin_token: Optional[str] = Header(default=N
                 text = ""
         if not text:
             text = f"I don't have substrate on '{last_user}' yet."
-        if _spine_why:
+        if _spine_why and not packet.is_personal():
             try:
                 _why = _spine_why(_resolved_query or last_user, max_lines=3)
                 if _why:
